@@ -21,10 +21,15 @@ jobs:
           key: ${{ secrets.SSH_KEY }}
           port: ${{ secrets.PORT }}
           script: |
+            echo "Starting deployment..."
             cd /root/reporting-backend
-            git pull origin main
-            npm install
-            npx prisma generate
-            npx prisma migrate deploy
-            npm run build
-            pm2 reload reporting-backend
+            echo "Current directory: $(pwd)"
+            git fetch origin
+            git checkout main
+            git pull origin main || { echo "Git pull failed"; exit 1; }
+            npm install || { echo "npm install failed"; exit 1; }
+            npx prisma generate || { echo "Prisma generate failed"; exit 1; }
+            npx prisma migrate deploy || { echo "Prisma migrate failed"; exit 1; }
+            npm run build || { echo "Build failed"; exit 1; }
+            pm2 reload reporting-backend || { echo "PM2 reload failed"; exit 1; }
+            echo "Deployment completed"
