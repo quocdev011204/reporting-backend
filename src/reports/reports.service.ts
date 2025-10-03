@@ -1,8 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment */
-/* eslint-disable @typescript-eslint/require-await */
-/* eslint-disable @typescript-eslint/no-unsafe-member-access */
-/* eslint-disable @typescript-eslint/no-unsafe-call */
-/* eslint-disable @typescript-eslint/no-unsafe-return */
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from 'src/services/prisma.service';
@@ -33,8 +28,8 @@ export class ReportsService {
     return this.prisma.report.findUnique({ where: { id } });
   }
 
-  async createReport(title: string, value: number, status?: string) {
-    return this.prisma.report.create({ data: { title, value, status } });
+  async createReport(title: string, value: number, userId: number) {
+    return this.prisma.report.create({ data: { title, value, userId } });
   }
 
   async updateReport(

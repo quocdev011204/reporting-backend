@@ -19,5 +19,6 @@
     "strict": true,
     "strictBindCallApply": false,
     "noFallthroughCasesInSwitch": false,
+    "types": ["node", "jest", "supertest"]
   }
 }

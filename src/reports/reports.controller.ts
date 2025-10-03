@@ -1,5 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-call */
-/* eslint-disable @typescript-eslint/no-unsafe-return */
 import {
   Body,
   Controller,
@@ -10,10 +8,22 @@ import {
   Post,
   Put,
   Query,
+  Req,
 } from '@nestjs/common';
 import { ReportsService } from './reports.service';
 import { UseGuards } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { Request } from 'express';
+
+interface JwtPayload {
+  id: number;
+  username: string;
+  role: string;
+}
+
+interface RequestWithUser extends Request {
+  user: JwtPayload;
+}
 
 @Controller('reports')
 export class ReportsController {
@@ -22,13 +32,11 @@ export class ReportsController {
   @Post()
   @UseGuards(JwtAuthGuard)
   async create(
-    @Body() body: { title: string; value: number; status?: string },
+    @Body() body: { title: string; value: number },
+    @Req() req: RequestWithUser,
   ) {
-    return this.reportsService.createReport(
-      body.title,
-      body.value,
-      body.status,
-    );
+    const userId = req.user.id;
+    return this.reportsService.createReport(body.title, body.value, userId);
   }
 
   @Get()

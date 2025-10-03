@@ -6,6 +6,9 @@ import { PrismaService } from './services/prisma.service';
 import { ReportsModule } from './reports/reports.module';
 import { UsersModule } from './users/users.module';
 import { AuthModule } from './auth/auth.module';
+import { TasksModule } from './tasks/tasks.module';
+import { TimeLogsModule } from './time-logs/time-logs.module';
+import { ProductivityModule } from './productivity/productivity.module';
 
 @Module({
   imports: [
@@ -15,6 +18,9 @@ import { AuthModule } from './auth/auth.module';
     ReportsModule,
     UsersModule,
     AuthModule,
+    TasksModule,
+    TimeLogsModule,
+    ProductivityModule,
   ],
   controllers: [AppController],
   providers: [AppService, PrismaService],
