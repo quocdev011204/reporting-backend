@@ -12,12 +12,15 @@ import {
   Query,
 } from '@nestjs/common';
 import { ReportsService } from './reports.service';
+import { UseGuards } from '@nestjs/common';
+import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 
 @Controller('reports')
 export class ReportsController {
   constructor(private readonly reportsService: ReportsService) {}
 
   @Post()
+  @UseGuards(JwtAuthGuard)
   async create(
     @Body() body: { title: string; value: number; status?: string },
   ) {
@@ -29,6 +32,7 @@ export class ReportsController {
   }
 
   @Get()
+  @UseGuards(JwtAuthGuard)
   async findAll(
     @Query()
     query: {
@@ -47,6 +51,7 @@ export class ReportsController {
   }
 
   @Put(':id')
+  @UseGuards(JwtAuthGuard)
   async update(
     @Param('id', ParseIntPipe) id: number,
     @Body() body: { title?: string; value?: number; status?: string },
@@ -55,6 +60,7 @@ export class ReportsController {
   }
 
   @Delete(':id')
+  @UseGuards(JwtAuthGuard)
   async delete(@Param('id', ParseIntPipe) id: number) {
     return this.reportsService.deleteReport(id);
   }
