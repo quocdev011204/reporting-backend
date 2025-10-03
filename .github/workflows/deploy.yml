@@ -1,13 +1,13 @@
-name: Deploy Backend to VPS # Tên workflow
+name: Deploy Backend to VPS
 
 on:
   push:
     branches:
-      - main # Trigger khi push lên main
+      - main
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest # Máy ảo GitHub chạy
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
@@ -21,15 +21,30 @@ jobs:
           key: ${{ secrets.SSH_KEY }}
           port: ${{ secrets.PORT }}
           script: |
-            echo "Starting deployment..."
-            cd /root/reporting-backend
-            echo "Current directory: $(pwd)"
+            echo "🚀 Starting deployment..."
+            cd /root/reporting-backend || exit 1
+
+            echo "📂 Current directory: $(pwd)"
+            echo "🔄 Resetting local changes..."
             git fetch origin
+            git reset --hard origin/main   # Xóa tất cả thay đổi cục bộ
+            git clean -fd                  # Xóa các file không được track
+
+            echo "⬇️ Ensuring latest code..."
             git checkout main
-            git pull origin main || { echo "Git pull failed"; exit 1; }
-            npm install || { echo "npm install failed"; exit 1; }
-            npx prisma generate || { echo "Prisma generate failed"; exit 1; }
-            npx prisma migrate deploy || { echo "Prisma migrate failed"; exit 1; }
-            npm run build || { echo "Build failed"; exit 1; }
-            pm2 reload reporting-backend || { echo "PM2 reload failed"; exit 1; }
-            echo "Deployment completed"
+            git pull origin main || { echo "❌ Git pull failed"; exit 1; }
+
+            echo "📦 Installing dependencies..."
+            npm install --legacy-peer-deps || { echo "❌ npm install failed"; exit 1; }
+
+            echo "🛠️ Running Prisma..."
+            npx prisma generate || { echo "❌ Prisma generate failed"; exit 1; }
+            npx prisma migrate deploy || { echo "❌ Prisma migrate failed"; exit 1; }
+
+            echo "🏗️ Building project..."
+            npm run build || { echo "❌ Build failed"; exit 1; }
+
+            echo "♻️ Restarting app with PM2..."
+            pm2 reload reporting-backend --update-env || { echo "❌ PM2 reload failed"; exit 1; }
+
+            echo "✅ Deployment completed successfully!"
