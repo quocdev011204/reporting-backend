@@ -38,4 +38,10 @@ export class UsersService {
   async findById(id: number) {
     return this.prisma.user.findUnique({ where: { id } });
   }
+
+  async getAllUsers() {
+    return this.prisma.user.findMany({
+      select: { id: true, username: true, role: true }, // Exclude password for security
+    });
+  }
 }
