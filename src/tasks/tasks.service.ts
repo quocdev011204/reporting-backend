@@ -29,5 +29,9 @@ export class TasksService {
     });
   }
 
+  async getTaskById(id: number): Promise<Task | null> {
+    return this.prisma.task.findUnique({ where: { id } });
+  }
+
   // Auto-assign sẽ được gọi từ n8n (backend chỉ cung cấp dữ liệu)
 }

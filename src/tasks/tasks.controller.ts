@@ -41,4 +41,10 @@ export class TasksController {
   async getAssigned(@Param('userId') userId: string): Promise<Task[]> {
     return this.tasksService.getAssignedTasks(Number(userId));
   }
+
+  @Get(':id')
+  @UseGuards(JwtAuthGuard)
+  async getTaskById(@Param('id') id: string): Promise<Task | null> {
+    return this.tasksService.getTaskById(Number(id));
+  }
 }
