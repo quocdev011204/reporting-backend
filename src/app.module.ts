@@ -9,6 +9,7 @@ import { AuthModule } from './auth/auth.module';
 import { TasksModule } from './tasks/tasks.module';
 import { TimeLogsModule } from './time-logs/time-logs.module';
 import { ProductivityModule } from './productivity/productivity.module';
+import { ProjectsModule } from './project/project.module';
 
 @Module({
   imports: [
@@ -21,6 +22,7 @@ import { ProductivityModule } from './productivity/productivity.module';
     TasksModule,
     TimeLogsModule,
     ProductivityModule,
+    ProjectsModule,
   ],
   controllers: [AppController],
   providers: [AppService, PrismaService],

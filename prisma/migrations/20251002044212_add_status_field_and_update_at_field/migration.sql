@@ -1,3 +1,0 @@
--- AlterTable
-ALTER TABLE "Report" ADD COLUMN     "status" TEXT,
-ADD COLUMN     "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP;

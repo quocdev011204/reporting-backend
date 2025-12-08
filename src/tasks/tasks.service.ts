@@ -1,37 +1,59 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from 'src/services/prisma.service';
-import { Task } from '@prisma/client';
+import { Prisma, Task } from '@prisma/client';
 
 @Injectable()
 export class TasksService {
   constructor(private prisma: PrismaService) {}
 
-  async createTask(
-    title: string,
-    description: string,
-    estimatedTime: number,
-  ): Promise<Task> {
+  async createTask(data: Prisma.TaskUncheckedCreateInput): Promise<Task> {
     return await this.prisma.task.create({
-      data: { title, description, estimatedTime, status: 'pending' },
+      data: {
+        ...data,
+        status: data.status || 'pending',
+      },
     });
   }
 
-  async updateStatus(taskId: number, status: string): Promise<Task> {
+  async updateTask(id: number, data: Prisma.TaskUpdateInput): Promise<Task> {
     return await this.prisma.task.update({
-      where: { id: taskId },
-      data: { status },
+      where: { id },
+      data,
     });
   }
 
   async getAssignedTasks(userId: number): Promise<Task[]> {
     return await this.prisma.task.findMany({
       where: { assignedToId: userId },
+      include: {
+        project: true,
+      },
+      orderBy: {
+        createdAt: 'desc',
+      },
     });
   }
 
   async getTaskById(id: number): Promise<Task | null> {
-    return this.prisma.task.findUnique({ where: { id } });
+    return this.prisma.task.findUnique({
+      where: { id },
+      include: {
+        project: true,
+        assignedTo: true,
+      },
+    });
   }
 
-  // Auto-assign sẽ được gọi từ n8n (backend chỉ cung cấp dữ liệu)
+  async getTasksByProject(projectId: number): Promise<Task[]> {
+    return await this.prisma.task.findMany({
+      where: { projectId },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  async deleteTask(id: number): Promise<Task> {
+    return await this.prisma.task.delete({
+      where: { id },
+    });
+  }
 }

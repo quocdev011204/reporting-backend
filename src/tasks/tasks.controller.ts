@@ -1,15 +1,17 @@
 import {
   Controller,
   Post,
-  Put,
   Get,
+  Patch,
   Body,
   Param,
   UseGuards,
+  ParseIntPipe,
+  Delete,
 } from '@nestjs/common';
 import { TasksService } from './tasks.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
-import { Task } from '@prisma/client';
+import { Prisma, Task } from '@prisma/client';
 
 @Controller('tasks')
 export class TasksController {
@@ -18,33 +20,47 @@ export class TasksController {
   @Post()
   @UseGuards(JwtAuthGuard)
   async create(
-    @Body() body: { title: string; description: string; estimatedTime: number },
+    @Body() createTaskDto: Prisma.TaskUncheckedCreateInput,
   ): Promise<Task> {
-    return this.tasksService.createTask(
-      body.title,
-      body.description,
-      body.estimatedTime,
-    );
+    return this.tasksService.createTask(createTaskDto);
   }
 
-  @Put(':id/status')
+  @Patch(':id')
   @UseGuards(JwtAuthGuard)
-  async updateStatus(
-    @Param('id') id: string,
-    @Body('status') status: string,
+  async update(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() updateTaskDto: Prisma.TaskUpdateInput,
   ): Promise<Task> {
-    return this.tasksService.updateStatus(Number(id), status);
+    return this.tasksService.updateTask(id, updateTaskDto);
   }
 
   @Get('assigned-to/:userId')
   @UseGuards(JwtAuthGuard)
-  async getAssigned(@Param('userId') userId: string): Promise<Task[]> {
-    return this.tasksService.getAssignedTasks(Number(userId));
+  async getAssigned(
+    @Param('userId', ParseIntPipe) userId: number,
+  ): Promise<Task[]> {
+    return this.tasksService.getAssignedTasks(userId);
+  }
+
+  @Get('project/:projectId')
+  @UseGuards(JwtAuthGuard)
+  async getByProject(
+    @Param('projectId', ParseIntPipe) projectId: number,
+  ): Promise<Task[]> {
+    return this.tasksService.getTasksByProject(projectId);
   }
 
   @Get(':id')
   @UseGuards(JwtAuthGuard)
-  async getTaskById(@Param('id') id: string): Promise<Task | null> {
-    return this.tasksService.getTaskById(Number(id));
+  async getTaskById(
+    @Param('id', ParseIntPipe) id: number,
+  ): Promise<Task | null> {
+    return this.tasksService.getTaskById(id);
+  }
+
+  @Delete(':id')
+  @UseGuards(JwtAuthGuard)
+  async deleteTask(@Param('id', ParseIntPipe) id: number): Promise<Task> {
+    return this.tasksService.deleteTask(id);
   }
 }
