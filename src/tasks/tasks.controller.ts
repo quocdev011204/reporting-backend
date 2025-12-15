@@ -10,22 +10,30 @@ import {
 import { TasksService } from './tasks.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { Task } from '@prisma/client';
+import { Public } from '../auth/public.decorator';
 
 @Controller('tasks')
 export class TasksController {
   constructor(private tasksService: TasksService) {}
 
+  @Public()
+  @Post('create')
+  async createTasksFromN8n(@Body() body: any) {
+    const tasks = Array.isArray(body) ? body : body[0];
+    return this.tasksService.createTasks(tasks);
+  }
+
   @Post()
   @UseGuards(JwtAuthGuard)
-  async create(
-    @Body() body: { title: string; description: string; estimatedTime: number },
-  ): Promise<Task> {
-    return this.tasksService.createTask(
-      body.title,
-      body.description,
-      body.estimatedTime,
-    );
-  }
+  // async create(
+  //   @Body() body: { title: string; description: string; estimatedTime: number },
+  // ): Promise<Task> {
+  //   return this.tasksService.createTask(
+  //     body.title,
+  //     body.description,
+  //     body.estimatedTime,
+  //   );
+  // }
 
   @Put(':id/status')
   @UseGuards(JwtAuthGuard)

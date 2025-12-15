@@ -40,8 +40,30 @@ export class UsersService {
   }
 
   async getAllUsers() {
-    return this.prisma.user.findMany({
-      select: { id: true, username: true, role: true }, // Exclude password for security
+    const users = await this.prisma.user.findMany({
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        role: true,
+        skills: true,
+        slackUserId: true,
+        jiraUserId: true,
+        availability: true,
+      },
     });
+
+    
+    const mapped = users.map((u, index) => ({
+      id: u.id,        
+      name: u.name,
+      mail: u.email,
+      skills: Array.isArray(u.skills) ? u.skills : [],
+      id_slack: u.slackUserId,
+      id_jira: u.jiraUserId,
+      role: u.role,
+    }));
+
+    return mapped;
   }
 }

@@ -13,50 +13,115 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model User {
-  id        Int       @id @default(autoincrement())
-  username  String    @unique
-  password  String
-  role      String?
-  tasks     Task[]
-  timeLogs  TimeLog[]
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
+model Project {
+  id             Int       @id @default(autoincrement())
+  name           String    @db.VarChar(255)
+  description    String?   @db.Text
+  startDate      DateTime? @map("start_date")
+  endDate        DateTime? @map("end_date")
+  status         String?   @db.VarChar(50)
+  predictedDelay Int?      @map("predicted_delay")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  tasks   Task[]
+  reports Report[]
+
+  @@map("project")
 }
 
 model Task {
-  id            Int       @id @default(autoincrement())
-  title         String
-  description   String?
-  assignedTo    User?     @relation(fields: [assignedToId], references: [id])
-  assignedToId  Int?
-  status        String
-  estimatedTime Float?
-  timeLogs      TimeLog[]
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  id             Int      @id @default(autoincrement())
+  projectId      Int      @map("project_id")
+  title          String   @db.VarChar(255)
+  description    String?  @db.Text
+  assignedToId   Int?     @map("assignee_id")
+  estimatedTime  Int?     @map("estimated_time")
+  actualTime     Int?     @map("actual_time")
+  status         String?  @db.VarChar(50)
+  priority       String?  @db.VarChar(20)
+  predictedDelay Int?     @map("predicted_delay")
+  jiraIssueId    String?  @map("jira_issue_id") @db.VarChar(50)
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  project    Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  assignedTo User?     @relation(fields: [assignedToId], references: [id])
+  timeLogs   TimeLog[]
+  alerts     Alert[]
+
+  @@map("task")
+}
+
+model User {
+  id           Int      @id @default(autoincrement())
+  username     String   @unique @db.VarChar(100)
+  password     String   @db.VarChar(255)
+  name         String?  @db.VarChar(100)
+  email        String?  @unique @db.VarChar(255)
+  role         String?  @db.VarChar(50)
+  availability Json?
+  skills       Json?
+  jiraUserId   String?  @map("jira_user_id") @db.VarChar(50)
+  slackUserId  String?  @map("slack_user_id") @db.VarChar(50)
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  tasks    Task[]
+  timeLogs TimeLog[]
+  reports  Report[]
+
+  @@map("user")
 }
 
 model TimeLog {
   id        Int       @id @default(autoincrement())
-  task      Task      @relation(fields: [taskId], references: [id])
-  taskId    Int
-  user      User      @relation(fields: [userId], references: [id])
-  userId    Int
-  startTime DateTime
-  endTime   DateTime?
-  duration  Float? // Calculated hours
-  createdAt DateTime  @default(now())
+  taskId    Int       @map("task_id")
+  userId    Int       @map("user_id")
+  startTime DateTime? @map("start_time")
+  endTime   DateTime? @map("end_time")
+  duration  Int?
+  notes     String?   @db.Text
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("time_log")
 }
 
 model Report {
-  id         Int      @id @default(autoincrement())
-  title      String
-  value      Float? // e.g., efficiency score
-  userId     Int
-  taskId     Int?
-  insights   String? // AI-generated from n8n (stored after callback)
-  totalHours Float? // Calculated from time logs
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  id          Int      @id @default(autoincrement())
+  projectId   Int?     @map("project_id") 
+  userId      Int?     @map("user_id")    
+  title       String?  @db.VarChar(255)
+  value       Int?
+  type        String?  @db.VarChar(50)
+  data        Json?
+  generatedAt DateTime @default(now()) @map("generated_at")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  project Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  // THÊM QUAN HỆ NÀY
+  user    User?    @relation(fields: [userId], references: [id])
+  alerts  Alert[]
+
+  @@map("report")
+}
+
+model Alert {
+  id        Int       @id @default(autoincrement())
+  reportId  Int?      @map("report_id")
+  taskId    Int?      @map("task_id")
+  message   String    @db.Text
+  sentTo    Json?     @map("sent_to")
+  sentAt    DateTime? @map("sent_at")
+  status    String?   @db.VarChar(20)
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  report Report? @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  task   Task?   @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@map("alert")
 }
