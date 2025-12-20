@@ -71,6 +71,7 @@ export class WorkflowService {
   async buildPrompt(
     chartUrl?: string,
     dateRange?: { start: string; end: string },
+    reportType: 'daily' | 'weekly' = 'daily',
   ) {
     const mergedData = await this.mergeDataPTM();
     const kpi = await this.kpiService.calculateKPI();
@@ -115,44 +116,9 @@ export class WorkflowService {
     // Giới hạn CSV length
     if (csv.length > 20000) csv = csv.slice(0, 20000);
 
-    // Build prompt theo format mới
-    const prompt = `Bạn là chuyên gia phân tích dự án. Phân tích chi tiết dữ liệu KPI và đưa ra báo cáo toàn diện.
-
-YÊU CẦU:
-
-1. **Phân tích xu hướng:** Thống kê số lượng task theo trạng thái (Pending, In Progress, Done, Blocked)
-
-2. **Điểm bất thường:** Liệt kê cụ thể task nào bị Blocked, ai phụ trách, nguyên nhân có thể
-
-3. **Rủi ro:** Task nào sắp hết hạn, ai chậm tiến độ, tác động đến dự án
-
-4. **Hành động cụ thể:** Đề xuất 3-5 hành động với tên người cụ thể và timeline
-
-QUAN TRỌNG - QUY TẮC VIẾT BÁO CÁO:
-
-- KHÔNG sử dụng task ID (T001, T002, T003...) trong báo cáo
-
-- Thay thế bằng mô tả công việc cụ thể (ví dụ: "Thiết kế API endpoints" thay vì "T001")
-
-- Sử dụng tên dự án hoặc mô tả ngắn gọn để nhận diện task
-
-- Tập trung vào nội dung công việc, không phải mã số
-
-ĐỊNH DẠNG:
-
-- Không dùng ký tự * hoặc markdown
-
-- Dùng dấu • cho bullet points
-
-- Tên người in đậm
-
-- Timeline rõ ràng (ngày/tháng)
-
-- Tối đa 2000 ký tự
-
-Data CSV:
-
-${csv}`;
+    // Build prompt theo chuẩn PM/Executive - Daily hoặc Weekly
+    const isDaily = reportType === 'daily';
+    const prompt = this.buildReportPrompt(isDaily, csv, kpi, dateRange);
 
     return {
       prompt,
@@ -163,9 +129,209 @@ ${csv}`;
         completionRate: kpi.tasks.completionRate,
         chartUrl,
         dateRange,
+        reportType,
         generatedAt: new Date().toISOString(),
       },
     };
+  }
+
+  /**
+   * Build prompt theo chuẩn PM/Executive - Daily hoặc Weekly
+   */
+  private buildReportPrompt(
+    isDaily: boolean,
+    csv: string,
+    kpi: any,
+    dateRange?: { start: string; end: string },
+  ): string {
+    const reportType = isDaily ? 'Daily' : 'Weekly';
+    const timeScope = isDaily ? 'ngày hôm nay' : 'tuần này';
+    
+    if (isDaily) {
+      // Template Daily Report - Ngắn gọn, tập trung vào hành động ngay
+      return `Bạn là Project Manager chuyên nghiệp. Tạo báo cáo Daily Standup theo chuẩn PM/Executive.
+
+MỤC ĐÍCH: Báo cáo ngắn gọn, tập trung vào hành động cần làm NGAY HÔM NAY.
+
+CẤU TRÚC BÁO CÁO (theo thứ tự):
+
+1. **EXECUTIVE SUMMARY** (2-3 dòng)
+   - Tóm tắt trạng thái tổng thể: On Track / At Risk / Off Track
+   - Số liệu chính: X dự án, Y tasks, Z% completion rate
+   - Điểm nổi bật nhất cần lưu ý
+
+2. **PHÂN TÍCH XU HƯỚNG** (So sánh với hôm qua)
+   - Thống kê task theo trạng thái: To Do, In Progress, Done, Blocked
+   - So sánh tăng/giảm: "To Do tăng +5", "In Progress giảm -2", "Done tăng +3"
+   - Đánh giá: Cải thiện / Xấu đi / Không đổi
+   - Nếu không có dữ liệu so sánh: Đổi thành "Phân bố trạng thái hiện tại"
+
+3. **ĐIỂM BẤT THƯỜNG & CẢNH BÁO**
+   - CHỈ liệt kê các vấn đề THỰC SỰ cần quan tâm:
+     • Tỷ lệ To Do >80% → Nguy cơ dồn việc cuối kỳ
+     • In Progress <2 tasks → Bottleneck nghiêm trọng
+     • Tỷ lệ Done <10% → Tiến độ chậm
+     • Task Blocked (nếu có) → Nguyên nhân và tác động
+   - KHÔNG liệt kê "không có Blocked" nếu đó là điều bình thường
+   - Mỗi điểm bất thường phải có phân tích nguyên nhân ngắn gọn
+
+4. **RỦI RO** (Tách rõ 2 loại)
+
+   a. **Rủi ro tiến độ:**
+      • Task sắp hết hạn trong 1-2 ngày tới (kèm deadline cụ thể)
+      • Task có nguy cơ trễ deadline
+      • Tác động đến milestone sắp tới
+   
+   b. **Rủi ro nhân sự:**
+      • Người chậm tiến độ (kèm task cụ thể)
+      • Người có quá nhiều task To Do (>3 tasks)
+      • Người thiếu hỗ trợ hoặc bị bottleneck
+
+5. **HÀNH ĐỘNG ĐỀ XUẤT** (Ưu tiên theo mức độ)
+
+   Format: [Priority] Action - Owner - Deadline
+   
+   [HIGH] - Hành động cần làm NGAY HÔM NAY, ảnh hưởng nghiêm trọng đến tiến độ
+   [MEDIUM] - Hành động quan trọng, cần làm trong 1-2 ngày tới
+   [LOW] - Hành động cải thiện, có thể lên kế hoạch tuần sau
+   
+   Ví dụ:
+   [HIGH] Yêu cầu Nguyen Van Admin báo cáo tiến độ task "Gather Requirements" - Deadline: Hôm nay
+   [MEDIUM] Giao Nguyen Luan hỗ trợ Nguyen Thanh Nguyen từ 21/12 đến 23/12
+   [LOW] Tổ chức họp đánh giá tiến độ dự án - Deadline: 25/12
+
+QUY TẮC VIẾT BÁO CÁO:
+
+- KHÔNG dùng task ID (T001, T002...) - Thay bằng mô tả công việc cụ thể
+- Viết ngắn gọn, súc tích - Tối đa 1500 ký tự cho Daily Report
+- Tập trung vào HÀNH ĐỘNG, không chỉ mô tả tình trạng
+- Mỗi phần phải có giá trị thực tế, không suy đoán mơ hồ
+- Ngôn ngữ chuyên nghiệp, phù hợp với Executive/PM
+
+ĐỊNH DẠNG:
+
+- Không dùng markdown (*, **)
+- Dùng dấu • cho bullet points
+- Tên người và task in đậm (nếu có thể)
+- Timeline rõ ràng: ngày/tháng cụ thể
+- Số liệu phải chính xác từ dữ liệu
+
+Data CSV:
+
+${csv}`;
+    } else {
+      // Template Weekly Report - Chi tiết, phân tích sâu hơn
+      return `Bạn là Project Manager chuyên nghiệp. Tạo báo cáo Weekly Review theo chuẩn PM/Executive.
+
+MỤC ĐÍCH: Báo cáo tổng hợp tuần, phân tích xu hướng và đưa ra chiến lược cho tuần tới.
+
+CẤU TRÚC BÁO CÁO (theo thứ tự):
+
+1. **EXECUTIVE SUMMARY** (4-5 dòng)
+   - Tóm tắt trạng thái tổng thể: On Track / At Risk / Off Track
+   - Số liệu chính: X dự án, Y tasks, Z% completion rate
+   - So sánh với tuần trước: Tăng/giảm bao nhiêu %
+   - Điểm nổi bật và thành tựu tuần này
+   - Thách thức lớn nhất cần giải quyết
+
+2. **PHÂN TÍCH XU HƯỚNG TUẦN** (So sánh với tuần trước)
+   - Thống kê task theo trạng thái: To Do, In Progress, Done, Blocked
+   - So sánh chi tiết:
+     • To Do: Tăng/giảm X tasks (Y%) - Phân tích nguyên nhân
+     • In Progress: Tăng/giảm X tasks (Y%) - Đánh giá hiệu quả
+     • Done: Tăng/giảm X tasks (Y%) - Tốc độ hoàn thành
+     • Blocked: Tăng/giảm X tasks - Vấn đề cần giải quyết
+   - Xu hướng tổng thể: Cải thiện / Xấu đi / Ổn định
+   - Dự đoán tuần tới dựa trên xu hướng hiện tại
+
+3. **PHÂN TÍCH CHI TIẾT**
+
+   a. **Điểm mạnh:**
+      • Những gì làm tốt trong tuần này
+      • Team member nào có thành tích nổi bật
+      • Dự án nào đang tiến triển tốt
+   
+   b. **Điểm yếu & Bất thường:**
+      • Tỷ lệ To Do >80% → Nguy cơ dồn việc
+      • In Progress <10% → Bottleneck nghiêm trọng
+      • Tỷ lệ Done <20% → Tiến độ chậm
+      • Task Blocked → Nguyên nhân sâu xa và giải pháp
+      • Phân tích nguyên nhân gốc rễ (Root Cause Analysis)
+   
+   c. **Cơ hội:**
+      • Cơ hội tăng tốc tiến độ
+      • Tối ưu hóa quy trình
+      • Tận dụng nguồn lực hiện có
+
+4. **RỦI RO & THÁCH THỨC** (Phân tích sâu)
+
+   a. **Rủi ro tiến độ:**
+      • Task sắp hết hạn trong tuần tới (kèm deadline)
+      • Task có nguy cơ trễ deadline cao
+      • Milestone nào có nguy cơ không đạt được
+      • Tác động đến timeline tổng thể của dự án
+      • Xác suất xảy ra và mức độ nghiêm trọng
+   
+   b. **Rủi ro nhân sự:**
+      • Người chậm tiến độ (kèm task cụ thể và nguyên nhân)
+      • Người có workload quá cao (>5 tasks)
+      • Người thiếu kỹ năng hoặc hỗ trợ
+      • Bottleneck trong team
+      • Đề xuất giải pháp cụ thể
+   
+   c. **Rủi ro kỹ thuật:**
+      • Vấn đề kỹ thuật có thể ảnh hưởng đến tiến độ
+      • Dependencies giữa các task
+      • Technical debt cần giải quyết
+
+5. **HÀNH ĐỘNG ĐỀ XUẤT** (Chiến lược tuần tới)
+
+   Format: [Priority] Action - Owner - Timeline - Success Criteria
+   
+   [HIGH] - Hành động quan trọng nhất, cần làm ngay tuần tới
+   [MEDIUM] - Hành động quan trọng, có thể lên kế hoạch
+   [LOW] - Hành động cải thiện, nice-to-have
+   
+   Mỗi hành động phải có:
+   - Mô tả cụ thể
+   - Người chịu trách nhiệm
+   - Timeline rõ ràng
+   - Tiêu chí thành công (Success Criteria)
+   
+   Ví dụ:
+   [HIGH] Yêu cầu Nguyen Van Admin báo cáo tiến độ hàng ngày cho task "Gather Requirements" - Timeline: 21/12-27/12 - Success: Hoàn thành 80% vào 25/12
+   [MEDIUM] Giao Nguyen Luan hỗ trợ Nguyen Thanh Nguyen và Nguyen Van Admin - Timeline: 21/12-27/12 - Success: Giảm 50% workload của 2 người
+   [LOW] Tổ chức họp retrospective và planning cho tuần sau - Timeline: 28/12 - Success: Có action items cụ thể
+
+6. **METRICS & KPIs** (Nếu có)
+   - Completion rate: X%
+   - Velocity: X tasks/tuần
+   - Average cycle time: X ngày
+   - Blocked time: X giờ
+   - So sánh với tuần trước và mục tiêu
+
+QUY TẮC VIẾT BÁO CÁO:
+
+- KHÔNG dùng task ID (T001, T002...) - Thay bằng mô tả công việc cụ thể
+- Viết chi tiết nhưng súc tích - Tối đa 2500 ký tự cho Weekly Report
+- Phân tích phải có căn cứ từ dữ liệu, không suy đoán
+- Tập trung vào INSIGHTS và ACTIONABLE ITEMS
+- Ngôn ngữ chuyên nghiệp, phù hợp với Executive/PM
+- Mỗi phần phải có giá trị thực tế và đề xuất cụ thể
+
+ĐỊNH DẠNG:
+
+- Không dùng markdown (*, **)
+- Dùng dấu • cho bullet points
+- Tên người và task in đậm (nếu có thể)
+- Timeline rõ ràng: ngày/tháng cụ thể
+- Số liệu phải chính xác từ dữ liệu
+- Dùng bảng hoặc danh sách có cấu trúc để dễ đọc
+
+Data CSV:
+
+${csv}`;
+    }
   }
 
   /**
@@ -174,12 +340,13 @@ ${csv}`;
   async prepareDataForN8n(
     chartUrl?: string,
     dateRange?: { start: string; end: string },
+    reportType: 'daily' | 'weekly' = 'daily',
   ) {
     const [mergedData, kpi, chartData, promptData] = await Promise.all([
       this.mergeDataPTM(),
       this.kpiService.calculateKPI(),
       this.chartsService.prepareChartData(),
-      this.buildPrompt(chartUrl, dateRange),
+      this.buildPrompt(chartUrl, dateRange, reportType),
     ]);
 
     return {
@@ -361,9 +528,10 @@ ${csv}`;
     dateRange?: { start: string; end: string },
     createGoogleDoc?: boolean,
     googleDocFolderId?: string,
+    reportType: 'daily' | 'weekly' = 'daily',
   ) {
     // 1. Tự lấy data từ database và build prompt
-    const promptData = await this.buildPrompt(chartUrl, dateRange);
+    const promptData = await this.buildPrompt(chartUrl, dateRange, reportType);
 
     // 2. Xử lý AI Agent
     let aiAgentResult: any;
@@ -530,9 +698,6 @@ ${csv}`;
     // Title
     content += `${promptData.metadata?.totalProjects || 0} Dự án - ${promptData.metadata?.totalTasks || 0} Nhiệm vụ\n`;
     content += `Báo cáo Tổng hợp - ${new Date().toLocaleDateString('vi-VN')}\n\n`;
-    if (reportId) {
-      content += `Report ID: ${reportId}\n\n`;
-    }
 
     // Summary (đã clean)
     if (cleanSummary) {
@@ -544,9 +709,13 @@ ${csv}`;
       content += `Biểu đồ KPI: ${chartUrl}\n\n`;
     }
 
-    // Footer
-    content += `\n---\n`;
-    content += `Generated at: ${new Date().toLocaleString('vi-VN')}\n`;
+    // Footer - Generated at và Report ID cùng dòng, Report ID ở bên phải
+    content += ``;
+    if (reportId) {
+      content += `Generated at: ${new Date().toLocaleString('vi-VN')} --- Report ID: ${reportId}\n`;
+    } else {
+      content += `Generated at: ${new Date().toLocaleString('vi-VN')}\n`;
+    }
 
     return content;
   }
@@ -588,33 +757,43 @@ ${csv}`;
     return data;
   }
 
-  /**
-   * Authenticate với Google Service Account
-   */
   private async getGoogleAuth() {
-    const serviceAccountEmail = this.configService.get<string>(
-      'GOOGLE_SERVICE_ACCOUNT_EMAIL',
-    );
-    const privateKey = this.configService
-      .get<string>('GOOGLE_PRIVATE_KEY')
-      ?.replace(/\\n/g, '\n');
+    const clientId = this.configService.get<string>('GOOGLE_CLIENT_ID');
+    const clientSecret = this.configService.get<string>('GOOGLE_CLIENT_SECRET');
+    const refreshToken = this.configService.get<string>('GOOGLE_REFRESH_TOKEN');
 
-    if (!serviceAccountEmail || !privateKey) {
+    // Ưu tiên OAuth 2.0 nếu có đầy đủ credentials
+    if (clientId && clientSecret && refreshToken) {
+      console.log('Using OAuth 2.0 authentication (personal Gmail account)');
+      const redirectUri =
+        this.configService.get<string>('GOOGLE_OAUTH_REDIRECT_URI') ||
+        `${this.configService.get<string>('APP_URL') || 'http://localhost:3000'}/auth/google/callback`;
+      
+      const oauth2Client = new google.auth.OAuth2(
+        clientId,
+        clientSecret,
+        redirectUri,
+      );
+
+      oauth2Client.setCredentials({
+        refresh_token: refreshToken,
+      });
+
+      return oauth2Client;
+    }
+
+    // Nếu có Client ID và Secret nhưng chưa có Refresh Token
+    if (clientId && clientSecret && !refreshToken) {
+      const appUrl = this.configService.get<string>('APP_URL') || 'http://localhost:3000';
       throw new Error(
-        'GOOGLE_SERVICE_ACCOUNT_EMAIL and GOOGLE_PRIVATE_KEY must be configured',
+        `OAuth 2.0 credentials found but no refresh token. Please authorize at: ${appUrl}/auth/google`,
       );
     }
 
-    const auth = new google.auth.JWT({
-      email: serviceAccountEmail,
-      key: privateKey,
-      scopes: [
-        'https://www.googleapis.com/auth/drive',
-        'https://www.googleapis.com/auth/documents',
-      ],
-    });
-
-    return auth;
+    // Không có OAuth credentials -> báo lỗi
+    throw new Error(
+      'OAuth 2.0 credentials are required. Please set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET and authorize at /auth/google to obtain GOOGLE_REFRESH_TOKEN.',
+    );
   }
 
   /**
@@ -625,22 +804,28 @@ ${csv}`;
     content: string,
     folderId?: string,
   ) {
+    // Các biến cần dùng cả trong try và catch
+    let useFolderId = folderId;
+    let folderWarning: string | null = null;
+    const serviceAccountEmail = this.configService.get<string>('GOOGLE_SERVICE_ACCOUNT_EMAIL');
+
     try {
       const auth = await this.getGoogleAuth();
       const docs = google.docs({ version: 'v1', auth });
       const drive = google.drive({ version: 'v3', auth });
-
-      // Kiểm tra folder tồn tại và có quyền truy cập trước
-      let useFolderId = folderId;
-      let folderWarning: string | null = null;
-      const serviceAccountEmail = this.configService.get<string>('GOOGLE_SERVICE_ACCOUNT_EMAIL');
+      
+      let folderOwnerEmail: string | null = null;
       
       if (folderId) {
         try {
-          await drive.files.get({
+          const folderInfo = await drive.files.get({
             fileId: folderId,
-            fields: 'id, name, mimeType',
+            fields: 'id, name, mimeType, owners',
           });
+          // Lấy email của folder owner (nếu có)
+          if (folderInfo.data.owners && folderInfo.data.owners.length > 0) {
+            folderOwnerEmail = folderInfo.data.owners[0].emailAddress || null;
+          }
         } catch (folderError: any) {
           // Nếu folder không truy cập được (404 hoặc 403), fallback tạo ở root Drive
           if (
@@ -671,10 +856,60 @@ ${csv}`;
         fileMetadata.parents = [useFolderId];
       }
 
-      const file = await drive.files.create({
-        requestBody: fileMetadata,
-        fields: 'id, name, parents',
-      });
+      let file;
+
+      try {
+        file = await drive.files.create({
+          requestBody: fileMetadata,
+          fields: 'id, name, parents',
+        });
+      } catch (createError: any) {
+        const createErrorMessage = createError.message || String(createError);
+        const isQuotaError =
+          createErrorMessage?.toLowerCase().includes('quota') ||
+          createErrorMessage?.toLowerCase().includes('storage quota') ||
+          createErrorMessage?.toLowerCase().includes('exceeded');
+        
+        const isFolderPermissionError =
+          createError.code === 403 ||
+          createError.code === 404 ||
+          createErrorMessage?.includes('not found') ||
+          createErrorMessage?.includes('permission') ||
+          createErrorMessage?.includes('insufficient') ||
+          createErrorMessage?.includes('forbidden');
+
+        // Nếu lỗi do quota hoặc folder permission, thử tạo ở root Drive của service account
+        if ((isQuotaError || isFolderPermissionError) && useFolderId) {
+          console.warn(
+            `Error creating file in folder "${useFolderId}": ${createErrorMessage}. Retrying in root Drive of service account.`,
+          );
+          const retryMetadata = {
+            ...fileMetadata,
+          };
+          delete (retryMetadata as any).parents;
+          useFolderId = undefined;
+          folderWarning = isQuotaError
+            ? `Folder "${folderId}" has quota issues. Document created in service account's root Drive instead.`
+            : `Folder "${folderId}" not accessible. Document created in service account's root Drive instead.`;
+          
+          try {
+            file = await drive.files.create({
+              requestBody: retryMetadata,
+              fields: 'id, name, parents',
+            });
+          } catch (retryError: any) {
+            // Nếu retry cũng fail, throw error với message rõ ràng
+            if (isQuotaError) {
+              throw new Error(
+                `Service Account's Drive storage quota has been exceeded. Please free up space in the service account's Drive or use a different Google account with available storage.`,
+              );
+            }
+            throw retryError;
+          }
+        } else {
+          throw createError;
+        }
+      }
 
       const documentId = file.data.id;
 
@@ -682,22 +917,32 @@ ${csv}`;
         throw new Error('Failed to create Google Docs document');
       }
 
-      // Insert content vào document
-      await docs.documents.batchUpdate({
-        documentId: documentId,
-        requestBody: {
-          requests: [
-            {
-              insertText: {
-                location: {
-                  index: 1,
-                },
-                text: content,
-              },
+      // Insert và format content với màu sắc và styling đẹp
+      await this.insertFormattedContent(docs, documentId, content);
+
+      // Transfer ownership sang folder owner để giải phóng quota của service account
+      // Điều này đặc biệt quan trọng với personal Gmail (không có domain-wide delegation)
+      if (folderOwnerEmail && folderOwnerEmail !== serviceAccountEmail) {
+        try {
+          // Tạo permission với role owner
+          await drive.permissions.create({
+            fileId: documentId,
+            requestBody: {
+              role: 'owner',
+              type: 'user',
+              emailAddress: folderOwnerEmail,
             },
-          ],
-        },
-      });
+            transferOwnership: true, // Transfer ownership parameter ở ngoài requestBody
+          });
+          console.log(`Transferred ownership to folder owner: ${folderOwnerEmail}`);
+        } catch (transferError: any) {
+          // Nếu transfer ownership fail, chỉ log warning, không throw error
+          // Vì file đã được tạo thành công
+          console.warn(
+            `Failed to transfer ownership to ${folderOwnerEmail}: ${transferError.message}`,
+          );
+        }
+      }
 
       const documentUrl = `https://docs.google.com/document/d/${documentId}/edit`;
 
@@ -723,8 +968,13 @@ ${csv}`;
         status: error.response?.status,
       });
 
-      // Kiểm tra nếu lỗi liên quan đến folder permission
+      // Kiểm tra các loại lỗi cụ thể
       const serviceAccountEmail = this.configService.get<string>('GOOGLE_SERVICE_ACCOUNT_EMAIL');
+      const isQuotaError =
+        errorMessage?.toLowerCase().includes('quota') ||
+        errorMessage?.toLowerCase().includes('storage quota') ||
+        errorMessage?.toLowerCase().includes('exceeded');
+      
       const isFolderPermissionError = 
         error.code === 403 ||
         error.code === 404 ||
@@ -733,15 +983,558 @@ ${csv}`;
         errorMessage?.includes('insufficient') ||
         errorMessage?.includes('forbidden');
 
-      if (isFolderPermissionError && folderId) {
+      if (isQuotaError) {
+        const impersonateUser = this.configService.get<string>('GOOGLE_IMPERSONATE_USER');
+        let solutionMessage = '';
+        
+        if (!impersonateUser) {
+          solutionMessage = `\n\nSOLUTION: Add GOOGLE_IMPERSONATE_USER to .env file to use domain-wide delegation:\n` +
+            `GOOGLE_IMPERSONATE_USER=your-email@yourdomain.com\n\n` +
+            `This will use the user account's storage quota instead of the service account's quota.\n` +
+            `Note: Domain-wide delegation must be enabled in Google Cloud Console for this to work.`;
+        } else {
+          solutionMessage = `\n\nCurrent impersonate user: ${impersonateUser}\n` +
+            `If this user also has quota issues, try a different user account with more storage.`;
+        }
+        
         throw new Error(
-          `Failed to create Google Docs: Folder not found or not accessible: ${folderId}. Please ensure the folder is shared with Service Account (${serviceAccountEmail}) with Editor permission.`,
+          `Failed to create Google Docs: Service Account's Drive storage quota has been exceeded.` +
+          `\nThe quota is calculated based on the Service Account's own Drive storage (${serviceAccountEmail}), not the folder owner's storage.` +
+          solutionMessage
+        );
+      }
+
+      if (isFolderPermissionError && useFolderId) {
+        throw new Error(
+          `Failed to create Google Docs: Folder not found or not accessible: ${useFolderId}. Please ensure the folder is shared with Service Account (${serviceAccountEmail}) with Editor permission.`,
         );
       }
 
       throw new Error(
         `Failed to create Google Docs: ${errorMessage}`,
       );
+    }
+  }
+
+  /**
+   * Insert và format content vào Google Docs với màu sắc và styling đẹp
+   */
+  private async insertFormattedContent(
+    docs: any,
+    documentId: string,
+    content: string,
+  ) {
+    // Bước 1: Insert tất cả text trước
+    await docs.documents.batchUpdate({
+      documentId: documentId,
+      requestBody: {
+        requests: [
+          {
+            insertText: {
+              location: { index: 1 },
+              text: content,
+            },
+          },
+        ],
+      },
+    });
+
+    // Bước 2: Parse content và tạo format requests
+    // Tính toán index chính xác dựa trên content đã insert
+    const lines = content.split('\n');
+    const formatRequests: any[] = [];
+    let currentIndex = 1;
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const lineStart = currentIndex;
+      const lineEnd = currentIndex + line.length;
+      
+      // Skip empty lines
+      if (!line.trim() && i < lines.length - 1) {
+        currentIndex = lineEnd + 1; // +1 for newline
+        continue;
+      }
+
+      // Format title (dòng đầu tiên)
+      if (i === 0 && line.trim().length > 0) {
+        formatRequests.push({
+          updateParagraphStyle: {
+            range: {
+              startIndex: lineStart,
+              endIndex: lineEnd,
+            },
+            paragraphStyle: {
+              namedStyleType: 'HEADING_1',
+              spaceAbove: { magnitude: 12, unit: 'PT' },
+              spaceBelow: { magnitude: 6, unit: 'PT' },
+            },
+            fields: 'namedStyleType,spaceAbove,spaceBelow',
+          },
+        });
+        formatRequests.push({
+          updateTextStyle: {
+            range: {
+              startIndex: lineStart,
+              endIndex: lineEnd,
+            },
+            textStyle: {
+              foregroundColor: {
+                color: {
+                  rgbColor: {
+                    red: 0.2,
+                    green: 0.4,
+                    blue: 0.8,
+                  },
+                },
+              },
+              bold: true,
+              fontSize: {
+                magnitude: 20,
+                unit: 'PT',
+              },
+            },
+            fields: 'foregroundColor,bold,fontSize',
+          },
+        });
+      }
+      // Format subtitle (dòng thứ 2)
+      else if (i === 1 && line.trim().length > 0) {
+        formatRequests.push({
+          updateParagraphStyle: {
+            range: {
+              startIndex: lineStart,
+              endIndex: lineEnd,
+            },
+            paragraphStyle: {
+              namedStyleType: 'HEADING_2',
+              spaceBelow: { magnitude: 12, unit: 'PT' },
+            },
+            fields: 'namedStyleType,spaceBelow',
+          },
+        });
+        formatRequests.push({
+          updateTextStyle: {
+            range: {
+              startIndex: lineStart,
+              endIndex: lineEnd,
+            },
+            textStyle: {
+              foregroundColor: {
+                color: {
+                  rgbColor: {
+                    red: 0.4,
+                    green: 0.4,
+                    blue: 0.4,
+                  },
+                },
+              },
+              fontSize: {
+                magnitude: 14,
+                unit: 'PT',
+              },
+            },
+            fields: 'foregroundColor,fontSize',
+          },
+        });
+      }
+      // Format footer line - Generated at và Report ID cùng dòng, căn phải
+      else if (line.includes('Generated at:') && line.includes('Report ID:')) {
+        // Căn phải cả dòng
+        formatRequests.push({
+          updateParagraphStyle: {
+            range: {
+              startIndex: lineStart,
+              endIndex: lineEnd,
+            },
+            paragraphStyle: {
+              alignment: 'END', // RIGHT alignment
+            },
+            fields: 'alignment',
+          },
+        });
+        // Format phần "Generated at:" - màu xám nhạt
+        const generatedAtStart = lineStart + line.indexOf('Generated at:');
+        const generatedAtEnd = generatedAtStart + 'Generated at:'.length;
+        formatRequests.push({
+          updateTextStyle: {
+            range: {
+              startIndex: generatedAtStart,
+              endIndex: generatedAtEnd,
+            },
+            textStyle: {
+              foregroundColor: {
+                color: {
+                  rgbColor: {
+                    red: 0.5,
+                    green: 0.5,
+                    blue: 0.5,
+                  },
+                },
+              },
+              italic: true,
+              fontSize: {
+                magnitude: 9,
+                unit: 'PT',
+              },
+            },
+            fields: 'foregroundColor,italic,fontSize',
+          },
+        });
+        // Format phần "Report ID:" - màu xám đậm hơn
+        const reportIdStart = lineStart + line.indexOf('Report ID:');
+        const reportIdEnd = reportIdStart + line.length - (reportIdStart - lineStart);
+        formatRequests.push({
+          updateTextStyle: {
+            range: {
+              startIndex: reportIdStart,
+              endIndex: reportIdEnd,
+            },
+            textStyle: {
+              foregroundColor: {
+                color: {
+                  rgbColor: {
+                    red: 0.6,
+                    green: 0.6,
+                    blue: 0.6,
+                  },
+                },
+              },
+              italic: true,
+              fontSize: {
+                magnitude: 10,
+                unit: 'PT',
+              },
+            },
+            fields: 'foregroundColor,italic,fontSize',
+          },
+        });
+      }
+      // Format Generated at nếu không có Report ID
+      else if (line.includes('Generated at:') && !line.includes('Report ID:')) {
+        formatRequests.push({
+          updateTextStyle: {
+            range: {
+              startIndex: lineStart,
+              endIndex: lineEnd,
+            },
+            textStyle: {
+              foregroundColor: {
+                color: {
+                  rgbColor: {
+                    red: 0.5,
+                    green: 0.5,
+                    blue: 0.5,
+                  },
+                },
+              },
+              italic: true,
+              fontSize: {
+                magnitude: 9,
+                unit: 'PT',
+              },
+            },
+            fields: 'foregroundColor,italic,fontSize',
+          },
+        });
+      }
+      // Format section headers (EXECUTIVE SUMMARY, PHÂN TÍCH XU HƯỜNG, etc.)
+      else if (
+        line.match(/^(EXECUTIVE SUMMARY|PHÂN TÍCH|ĐIỂM|RỦI RO|HÀNH ĐỘNG|METRICS)/i)
+      ) {
+        formatRequests.push({
+          updateParagraphStyle: {
+            range: {
+              startIndex: lineStart,
+              endIndex: lineEnd,
+            },
+            paragraphStyle: {
+              namedStyleType: 'HEADING_2',
+              spaceAbove: { magnitude: 18, unit: 'PT' },
+              spaceBelow: { magnitude: 6, unit: 'PT' },
+            },
+            fields: 'namedStyleType,spaceAbove,spaceBelow',
+          },
+        });
+        formatRequests.push({
+          updateTextStyle: {
+            range: {
+              startIndex: lineStart,
+              endIndex: lineEnd,
+            },
+            textStyle: {
+              foregroundColor: {
+                color: {
+                  rgbColor: {
+                    red: 0.85,
+                    green: 0.33,
+                    blue: 0.1,
+                  },
+                },
+              },
+              bold: true,
+              fontSize: {
+                magnitude: 14,
+                unit: 'PT',
+              },
+            },
+            fields: 'foregroundColor,bold,fontSize',
+          },
+        });
+      }
+      // Format subsection headers (a., b., 1., 2., etc.)
+      else if (line.match(/^\s*[a-z]\.\s+[A-Z]/) || line.match(/^\s*\d+\.\s+[A-Z]/)) {
+        formatRequests.push({
+          updateParagraphStyle: {
+            range: {
+              startIndex: lineStart,
+              endIndex: lineEnd,
+            },
+            paragraphStyle: {
+              spaceAbove: { magnitude: 6, unit: 'PT' },
+              spaceBelow: { magnitude: 3, unit: 'PT' },
+            },
+            fields: 'spaceAbove,spaceBelow',
+          },
+        });
+        formatRequests.push({
+          updateTextStyle: {
+            range: {
+              startIndex: lineStart,
+              endIndex: lineEnd,
+            },
+            textStyle: {
+              foregroundColor: {
+                color: {
+                  rgbColor: {
+                    red: 0.2,
+                    green: 0.5,
+                    blue: 0.8,
+                  },
+                },
+              },
+              bold: true,
+              fontSize: {
+                magnitude: 12,
+                unit: 'PT',
+              },
+            },
+            fields: 'foregroundColor,bold,fontSize',
+          },
+        });
+      }
+      // Format priority tags [HIGH], [MEDIUM], [LOW]
+      else if (line.includes('[HIGH]')) {
+        const highStart = lineStart + line.indexOf('[HIGH]');
+        const highEnd = highStart + 6;
+        formatRequests.push({
+          updateTextStyle: {
+            range: {
+              startIndex: highStart,
+              endIndex: highEnd,
+            },
+            textStyle: {
+              foregroundColor: {
+                color: {
+                  rgbColor: {
+                    red: 0.9,
+                    green: 0.2,
+                    blue: 0.2,
+                  },
+                },
+              },
+              bold: true,
+            },
+            fields: 'foregroundColor,bold',
+          },
+        });
+      } else if (line.includes('[MEDIUM]')) {
+        const mediumStart = lineStart + line.indexOf('[MEDIUM]');
+        const mediumEnd = mediumStart + 8;
+        formatRequests.push({
+          updateTextStyle: {
+            range: {
+              startIndex: mediumStart,
+              endIndex: mediumEnd,
+            },
+            textStyle: {
+              foregroundColor: {
+                color: {
+                  rgbColor: {
+                    red: 1.0,
+                    green: 0.65,
+                    blue: 0.0,
+                  },
+                },
+              },
+              bold: true,
+            },
+            fields: 'foregroundColor,bold',
+          },
+        });
+      } else if (line.includes('[LOW]')) {
+        const lowStart = lineStart + line.indexOf('[LOW]');
+        const lowEnd = lowStart + 5;
+        formatRequests.push({
+          updateTextStyle: {
+            range: {
+              startIndex: lowStart,
+              endIndex: lowEnd,
+            },
+            textStyle: {
+              foregroundColor: {
+                color: {
+                  rgbColor: {
+                    red: 0.2,
+                    green: 0.7,
+                    blue: 0.3,
+                  },
+                },
+              },
+              bold: true,
+            },
+            fields: 'foregroundColor,bold',
+          },
+        });
+      }
+      // Format bullet points
+      else if (line.trim().startsWith('•')) {
+        formatRequests.push({
+          createParagraphBullets: {
+            range: {
+              startIndex: lineStart,
+              endIndex: lineEnd,
+            },
+            bulletPreset: 'BULLET_DISC_CIRCLE_SQUARE',
+          },
+        });
+        formatRequests.push({
+          updateTextStyle: {
+            range: {
+              startIndex: lineStart,
+              endIndex: lineEnd,
+            },
+            textStyle: {
+              fontSize: {
+                magnitude: 11,
+                unit: 'PT',
+              },
+            },
+            fields: 'fontSize',
+          },
+        });
+      }
+      // Format status indicators (On Track, At Risk, Off Track)
+      else if (
+        line.match(/On Track|At Risk|Off Track/i)
+      ) {
+        const statusMatch = line.match(/(On Track|At Risk|Off Track)/i);
+        if (statusMatch) {
+          const statusStart = lineStart + line.indexOf(statusMatch[0]);
+          const statusEnd = statusStart + statusMatch[0].length;
+          let statusColor = { red: 0.2, green: 0.7, blue: 0.3 }; // Green for On Track
+          if (statusMatch[0].toLowerCase().includes('risk')) {
+            statusColor = { red: 1.0, green: 0.65, blue: 0.0 }; // Orange
+          } else if (statusMatch[0].toLowerCase().includes('off')) {
+            statusColor = { red: 0.9, green: 0.2, blue: 0.2 }; // Red
+          }
+          formatRequests.push({
+            updateTextStyle: {
+              range: {
+                startIndex: statusStart,
+                endIndex: statusEnd,
+              },
+              textStyle: {
+                foregroundColor: {
+                  color: {
+                    rgbColor: statusColor,
+                  },
+                },
+                bold: true,
+              },
+              fields: 'foregroundColor,bold',
+            },
+          });
+        }
+      }
+      // Format numbers và percentages
+      else if (line.match(/\d+%|\d+\s*(tasks|dự án|người)/i)) {
+        const numberMatch = line.match(/(\d+%|\d+\s*(tasks|dự án|người))/i);
+        if (numberMatch) {
+          const numberStart = lineStart + line.indexOf(numberMatch[0]);
+          const numberEnd = numberStart + numberMatch[0].length;
+          formatRequests.push({
+            updateTextStyle: {
+              range: {
+                startIndex: numberStart,
+                endIndex: numberEnd,
+              },
+              textStyle: {
+                bold: true,
+                foregroundColor: {
+                  color: {
+                    rgbColor: {
+                      red: 0.2,
+                      green: 0.4,
+                      blue: 0.8,
+                    },
+                  },
+                },
+              },
+              fields: 'bold,foregroundColor',
+            },
+          });
+        }
+      }
+      // Format footer (Generated at, ---)
+      else if (line.includes('Generated at:') || line.trim() === '---') {
+        formatRequests.push({
+          updateTextStyle: {
+            range: {
+              startIndex: lineStart,
+              endIndex: lineEnd,
+            },
+            textStyle: {
+              foregroundColor: {
+                color: {
+                  rgbColor: {
+                    red: 0.5,
+                    green: 0.5,
+                    blue: 0.5,
+                  },
+                },
+              },
+              italic: true,
+              fontSize: {
+                magnitude: 9,
+                unit: 'PT',
+              },
+            },
+            fields: 'foregroundColor,italic,fontSize',
+          },
+        });
+      }
+
+      // Cập nhật currentIndex cho dòng tiếp theo (+1 cho newline character)
+      currentIndex = lineEnd + 1;
+    }
+
+    // Bước 3: Execute all formatting requests trong batch
+    if (formatRequests.length > 0) {
+      try {
+        await docs.documents.batchUpdate({
+          documentId: documentId,
+          requestBody: {
+            requests: formatRequests,
+          },
+        });
+        console.log(`Applied ${formatRequests.length} formatting requests`);
+      } catch (formatError: any) {
+        // Nếu format fail, log warning nhưng không throw error
+        // Vì document đã được tạo thành công với text
+        console.warn('Failed to apply formatting:', formatError.message);
+        console.warn('Format error details:', formatError);
+      }
     }
   }
 
@@ -766,7 +1559,7 @@ ${csv}`;
         throw new Error('Invalid document structure');
       }
 
-      // Xóa nội dung cũ và insert nội dung mới
+      // Xóa nội dung cũ
       await docs.documents.batchUpdate({
         documentId: documentId,
         requestBody: {
@@ -779,17 +1572,12 @@ ${csv}`;
                 },
               },
             },
-            {
-              insertText: {
-                location: {
-                  index: 1,
-                },
-                text: content,
-              },
-            },
           ],
         },
       });
+
+      // Insert và format nội dung mới với styling đẹp
+      await this.insertFormattedContent(docs, documentId, content);
 
       const documentUrl = `https://docs.google.com/document/d/${documentId}/edit`;
 

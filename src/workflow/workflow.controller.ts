@@ -26,10 +26,15 @@ export class WorkflowController {
     @Query('chartUrl') chartUrl?: string,
     @Query('startDate') startDate?: string,
     @Query('endDate') endDate?: string,
+    @Query('reportType') reportType?: 'daily' | 'weekly',
   ) {
     const dateRange =
       startDate && endDate ? { start: startDate, end: endDate } : undefined;
-    return this.workflowService.buildPrompt(chartUrl, dateRange);
+    return this.workflowService.buildPrompt(
+      chartUrl,
+      dateRange,
+      reportType || 'daily',
+    );
   }
 
   /**
@@ -42,10 +47,15 @@ export class WorkflowController {
     @Query('chartUrl') chartUrl?: string,
     @Query('startDate') startDate?: string,
     @Query('endDate') endDate?: string,
+    @Query('reportType') reportType?: 'daily' | 'weekly',
   ) {
     const dateRange =
       startDate && endDate ? { start: startDate, end: endDate } : undefined;
-    return this.workflowService.prepareDataForN8n(chartUrl, dateRange);
+    return this.workflowService.prepareDataForN8n(
+      chartUrl,
+      dateRange,
+      reportType || 'daily',
+    );
   }
 
   /**
@@ -61,6 +71,7 @@ export class WorkflowController {
       chartUrl?: string;
       startDate?: string;
       endDate?: string;
+      reportType?: 'daily' | 'weekly';
       options?: {
         model?: string;
         temperature?: number;
@@ -77,7 +88,11 @@ export class WorkflowController {
       const promptData = await this.workflowService.buildPrompt(
         body.chartUrl,
         dateRange,
+        body.reportType || 'daily',
       );
+      if (!promptData || !promptData.prompt) {
+        throw new Error('Failed to build prompt');
+      }
       return this.workflowService.processAIAgent(
         promptData.prompt,
         body.chartUrl,
@@ -130,6 +145,7 @@ export class WorkflowController {
       endDate?: string;
       createGoogleDoc?: boolean; // Tạo Google Docs document
       googleDocFolderId?: string; // Folder ID để lưu Google Docs
+      reportType?: 'daily' | 'weekly'; // Loại báo cáo: daily hoặc weekly
     },
   ) {
     const dateRange =
@@ -141,6 +157,7 @@ export class WorkflowController {
       dateRange,
       body.createGoogleDoc || false,
       body.googleDocFolderId,
+      body.reportType || 'daily',
     );
   }
 

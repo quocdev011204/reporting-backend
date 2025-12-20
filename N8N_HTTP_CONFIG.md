@@ -2,8 +2,9 @@
 
 ## Base URL
 ```
-http://localhost:3000
+http://172.17.0.1:3000
 ```
+(Lưu ý: Sử dụng `172.17.0.1:3000` khi n8n chạy trong Docker container)
 
 ---
 
@@ -12,7 +13,7 @@ http://localhost:3000
 
 ### Cấu hình:
 - **Method:** `GET`
-- **URL:** `http://localhost:3000/workflow/merge-data`
+- **URL:** `http://172.17.0.1:3000/workflow/merge-data`
 - **Authentication:** None (Public endpoint)
 - **Response Format:** JSON
 
@@ -37,7 +38,7 @@ http://localhost:3000
 
 ### Cấu hình:
 - **Method:** `GET`
-- **URL:** `http://localhost:3000/workflow/build-prompt`
+- **URL:** `http://172.17.0.1:3000/workflow/build-prompt`
 - **Query Parameters:**
   - `chartUrl` (optional): URL của chart từ QuickChart
   - `startDate` (optional): Ngày bắt đầu (format: YYYY-MM-DD)
@@ -46,7 +47,7 @@ http://localhost:3000
 
 ### Ví dụ URL:
 ```
-http://localhost:3000/workflow/build-prompt?chartUrl=https://quickchart.io/chart?c=...&startDate=2024-01-01&endDate=2024-01-31
+http://172.17.0.1:3000/workflow/build-prompt?chartUrl=https://quickchart.io/chart?c=...&startDate=2024-01-01&endDate=2024-01-31
 ```
 
 ### Response mẫu:
@@ -68,7 +69,7 @@ http://localhost:3000/workflow/build-prompt?chartUrl=https://quickchart.io/chart
 
 ### Cấu hình:
 - **Method:** `GET`
-- **URL:** `http://localhost:3000/workflow/prepare-data`
+- **URL:** `http://172.17.0.1:3000/workflow/prepare-data`
 - **Query Parameters:**
   - `chartUrl` (optional): URL của chart
   - `startDate` (optional): Ngày bắt đầu
@@ -93,7 +94,7 @@ http://localhost:3000/workflow/build-prompt?chartUrl=https://quickchart.io/chart
 
 ### Cấu hình:
 - **Method:** `POST`
-- **URL:** `http://localhost:3000/workflow/process-ai-report`
+- **URL:** `http://172.17.0.1:3000/workflow/process-ai-report`
 - **Headers:**
   - `Content-Type: application/json`
 - **Body (JSON):**
@@ -113,7 +114,7 @@ http://localhost:3000/workflow/build-prompt?chartUrl=https://quickchart.io/chart
 
 ### Cấu hình:
 - **Method:** `POST`
-- **URL:** `http://localhost:3000/workflow/upload-file`
+- **URL:** `http://172.17.0.1:3000/workflow/upload-file`
 - **Headers:**
   - `Content-Type: application/json`
 - **Body (JSON):**
@@ -144,7 +145,7 @@ http://localhost:3000/workflow/build-prompt?chartUrl=https://quickchart.io/chart
 
 ### Cấu hình:
 - **Method:** `POST`
-- **URL:** `http://localhost:3000/workflow/share-file`
+- **URL:** `http://172.17.0.1:3000/workflow/share-file`
 - **Headers:**
   - `Content-Type: application/json`
 - **Body (JSON):**
@@ -175,14 +176,14 @@ http://localhost:3000/workflow/build-prompt?chartUrl=https://quickchart.io/chart
 
 ### Cấu hình:
 - **Method:** `GET`
-- **URL:** `http://localhost:3000/workflow/build-drive-url`
+- **URL:** `http://172.17.0.1:3000/workflow/build-drive-url`
 - **Query Parameters:**
   - `fileId`: File ID từ response của upload-file
 - **Authentication:** None (Public endpoint)
 
 ### Ví dụ URL:
 ```
-http://localhost:3000/workflow/build-drive-url?fileId=1a2b3c4d5e6f7g8h9i0j
+http://172.17.0.1:3000/workflow/build-drive-url?fileId=1a2b3c4d5e6f7g8h9i0j
 ```
 
 ### Response mẫu:
@@ -203,7 +204,7 @@ http://localhost:3000/workflow/build-drive-url?fileId=1a2b3c4d5e6f7g8h9i0j
 
 ### Cấu hình:
 - **Method:** `POST`
-- **URL:** `http://localhost:3000/workflow/upload-and-share`
+- **URL:** `http://172.17.0.1:3000/workflow/upload-and-share`
 - **Headers:**
   - `Content-Type: application/json`
 - **Body (JSON):**
@@ -226,7 +227,7 @@ http://localhost:3000/workflow/build-drive-url?fileId=1a2b3c4d5e6f7g8h9i0j
 
 ### Cấu hình:
 - **Method:** `POST`
-- **URL:** `http://localhost:3000/workflow/prepare-message`
+- **URL:** `http://172.17.0.1:3000/workflow/prepare-message`
 - **Headers:**
   - `Content-Type: application/json`
 - **Body (JSON):**
@@ -275,21 +276,21 @@ https://quickchart.io/chart?c={"type":"bar","data":{"labels":["A","B"],"datasets
 
 ### Get Chart Data
 - **Method:** `GET`
-- **URL:** `http://localhost:3000/charts/data`
+- **URL:** `http://172.17.0.1:3000/charts/data`
 - **Response:** Dữ liệu cho biểu đồ (tasksByStatus, tasksByPriority, etc.)
 
 ### Get KPI
 - **Method:** `GET`
-- **URL:** `http://localhost:3000/kpi`
+- **URL:** `http://172.17.0.1:3000/kpi`
 - **Response:** KPI metrics
 
 ### Get KPI by Date Range
 - **Method:** `GET`
-- **URL:** `http://localhost:3000/kpi/range?start=2024-01-01&end=2024-01-31`
+- **URL:** `http://172.17.0.1:3000/kpi/range?start=2024-01-01&end=2024-01-31`
 
 ### Create Report
 - **Method:** `POST`
-- **URL:** `http://localhost:3000/reports`
+- **URL:** `http://172.17.0.1:3000/reports`
 - **Headers:** `Authorization: Bearer <JWT_TOKEN>`
 - **Body:**
 ```json
@@ -301,7 +302,7 @@ https://quickchart.io/chart?c={"type":"bar","data":{"labels":["A","B"],"datasets
 
 ### Create Report from AI
 - **Method:** `POST`
-- **URL:** `http://localhost:3000/reports/ai`
+- **URL:** `http://172.17.0.1:3000/reports/ai`
 - **Body:**
 ```json
 {
