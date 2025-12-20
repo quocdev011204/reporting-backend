@@ -12,7 +12,10 @@ import { TimeLogsModule } from './time-logs/time-logs.module';
 import { ProductivityModule } from './productivity/productivity.module';
 import { APP_GUARD } from '@nestjs/core';
 import { JwtAuthGuard } from './auth/jwt-auth.guard';
-
+import { KpiModule } from './kpi/kpi.module';
+import { ChartsModule } from './charts/charts.module';
+import { AlertsModule } from './alerts/alerts.module';
+import { WorkflowModule } from './workflow/workflow.module';
 
 @Module({
   imports: [
@@ -26,15 +29,19 @@ import { JwtAuthGuard } from './auth/jwt-auth.guard';
     ProjectsModule,
     TimeLogsModule,
     ProductivityModule,
+    KpiModule,
+    ChartsModule,
+    AlertsModule,
+    WorkflowModule,
   ],
   controllers: [AppController],
   providers: [
-    AppService, 
+    AppService,
     PrismaService,
     {
       provide: APP_GUARD,
       useClass: JwtAuthGuard,
-    }
+    },
   ],
 })
 export class AppModule {}

@@ -82,4 +82,30 @@ export class ReportsController {
   async search(@Query('query') query: string) {
     return this.reportsService.searchReports(query);
   }
+
+  @Post('ai')
+  async createReportFromAI(
+    @Body()
+    body: {
+      projectId?: number;
+      userId?: number;
+      title?: string;
+      type?: string;
+      data?: any;
+      generatedAt?: string;
+    },
+  ) {
+    return this.reportsService.createReportFromAI({
+      ...body,
+      generatedAt: body.generatedAt ? new Date(body.generatedAt) : undefined,
+    });
+  }
+
+  @Put(':id/ai')
+  async updateReportWithAIData(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: { title?: string; data?: any; type?: string },
+  ) {
+    return this.reportsService.updateReportWithAIData(id, body);
+  }
 }

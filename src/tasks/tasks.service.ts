@@ -6,11 +6,8 @@ import { Task } from '@prisma/client';
 export class TasksService {
   constructor(private prisma: PrismaService) {}
 
-  
   async createTasks(tasks: any[]) {
-    const emails = tasks
-      .map(t => t.member_mail)
-      .filter(Boolean);
+    const emails = tasks.map((t) => t.member_mail).filter(Boolean);
 
     // 2️⃣ Query users 1 lần
     const users = await this.prisma.user.findMany({
@@ -20,12 +17,10 @@ export class TasksService {
     });
 
     // 3️⃣ Map email -> userId
-    const userMap = new Map(
-      users.map(u => [u.email, u.id]),
-    );
+    const userMap = new Map(users.map((u) => [u.email, u.id]));
 
     // 4️⃣ Chuẩn bị data tasks
-    const taskData = tasks.map(task => ({
+    const taskData = tasks.map((task) => ({
       projectId: task.project_id,
       title: task.task_name,
       description: task.task_description,
@@ -38,9 +33,7 @@ export class TasksService {
 
     // 5️⃣ Insert trong transaction
     const createdTasks = await this.prisma.$transaction(
-      taskData.map(data =>
-        this.prisma.task.create({ data }),
-      ),
+      taskData.map((data) => this.prisma.task.create({ data })),
     );
 
     return {
@@ -64,6 +57,31 @@ export class TasksService {
 
   async getTaskById(id: number): Promise<Task | null> {
     return this.prisma.task.findUnique({ where: { id } });
+  }
+
+  async getAllTasks() {
+    return this.prisma.task.findMany({
+      orderBy: {
+        createdAt: 'desc',
+      },
+      include: {
+        project: {
+          select: {
+            id: true,
+            name: true,
+            status: true,
+          },
+        },
+        assignedTo: {
+          select: {
+            id: true,
+            username: true,
+            name: true,
+            email: true,
+          },
+        },
+      },
+    });
   }
 
   // Auto-assign sẽ được gọi từ n8n (backend chỉ cung cấp dữ liệu)

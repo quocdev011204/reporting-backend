@@ -1,7 +1,7 @@
-import { Body, Controller, Post } from '@nestjs/common';
+import { Body, Controller, Post, Get, UseGuards } from '@nestjs/common';
 import { ProjectsService } from './projects.service';
-import { HttpCode, HttpStatus } from '@nestjs/common';
 import { Public } from '../auth/public.decorator';
+import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 
 @Controller('projects')
 export class ProjectsController {
@@ -14,7 +14,9 @@ export class ProjectsController {
     return this.projectsService.createFromN8n(data);
   }
 
-
-  
+  @Public()
+  @Get()
+  async getAllProjects() {
+    return this.projectsService.getAllProjects();
+  }
 }
-

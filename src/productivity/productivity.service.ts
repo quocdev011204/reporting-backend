@@ -18,7 +18,10 @@ export class ProductivityService {
         },
       },
     });
-    const totalHours = logs.reduce((t, l) => t + (l.duration || 0), 0);
+    const totalHours = logs.reduce(
+      (t: number, l: { duration: number | null }) => t + (l.duration || 0),
+      0,
+    );
     const completedTasks = await this.prisma.task.count({
       where: { assignedToId: userId, status: 'completed' },
     });

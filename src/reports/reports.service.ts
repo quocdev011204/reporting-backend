@@ -16,7 +16,7 @@ export class ReportsService {
     const skip = query.page ? (+query.page - 1) * take : 0;
     const orderBy = query.sort
       ? { [query.sort.split(':')[0]]: query.sort.split(':')[1] }
-      : { createdAt: Prisma.SortOrder.asc };
+      : { createdAt: 'asc' as const };
     const where = query.filter
       ? { value: { gt: parseFloat(query.filter.split('>')[1]) } }
       : {};
@@ -54,6 +54,41 @@ export class ReportsService {
   async searchReports(query: string) {
     return this.prisma.report.findMany({
       where: { title: { contains: query } },
+    });
+  }
+
+  async createReportFromAI(data: {
+    projectId?: number;
+    userId?: number;
+    title?: string;
+    type?: string;
+    data?: any;
+    generatedAt?: Date;
+  }) {
+    return this.prisma.report.create({
+      data: {
+        projectId: data.projectId,
+        userId: data.userId,
+        title: data.title || 'AI Generated Report',
+        type: data.type || 'ai_report',
+        data: data.data,
+        generatedAt: data.generatedAt || new Date(),
+      },
+    });
+  }
+
+  async updateReportWithAIData(
+    id: number,
+    data: { title?: string; data?: any; type?: string },
+  ) {
+    return this.prisma.report.update({
+      where: { id },
+      data: {
+        title: data.title,
+        data: data.data,
+        type: data.type,
+        updatedAt: new Date(),
+      },
     });
   }
 }

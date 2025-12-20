@@ -22,7 +22,4 @@ export class UsersController {
   async getUser(@Param('id') id: number) {
     return this.usersService.findById(id);
   }
-
-  
-  
 }

@@ -53,9 +53,8 @@ export class UsersService {
       },
     });
 
-    
     const mapped = users.map((u, index) => ({
-      id: u.id,        
+      id: u.id,
       name: u.name,
       mail: u.email,
       skills: Array.isArray(u.skills) ? u.skills : [],

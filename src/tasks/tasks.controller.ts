@@ -34,7 +34,6 @@ export class TasksController {
   //     body.estimatedTime,
   //   );
   // }
-
   @Put(':id/status')
   @UseGuards(JwtAuthGuard)
   async updateStatus(
@@ -42,6 +41,12 @@ export class TasksController {
     @Body('status') status: string,
   ): Promise<Task> {
     return this.tasksService.updateStatus(Number(id), status);
+  }
+
+  @Public()
+  @Get()
+  async getAllTasks() {
+    return this.tasksService.getAllTasks();
   }
 
   @Get('assigned-to/:userId')
