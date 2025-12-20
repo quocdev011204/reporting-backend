@@ -118,7 +118,7 @@ export class WorkflowController {
 
   /**
    * API tổng hợp - xử lý AI và tạo report trong 1 lần gọi
-   * Backend xử lý tất cả: prepare data + AI Agent + Groq Chat
+   * Backend xử lý tất cả: prepare data + AI Agent + Groq Chat + Create Report + Create/Update Google Docs
    */
   @Public()
   @Post('process-ai-report')
@@ -128,6 +128,8 @@ export class WorkflowController {
       chartUrl?: string;
       startDate?: string;
       endDate?: string;
+      createGoogleDoc?: boolean; // Tạo Google Docs document
+      googleDocFolderId?: string; // Folder ID để lưu Google Docs
     },
   ) {
     const dateRange =
@@ -137,6 +139,8 @@ export class WorkflowController {
     return this.workflowService.processAIAndCreateReport(
       body.chartUrl,
       dateRange,
+      body.createGoogleDoc || false,
+      body.googleDocFolderId,
     );
   }
 
@@ -234,6 +238,72 @@ export class WorkflowController {
         type: body.shareType,
         emailAddress: body.emailAddress,
       },
+    );
+  }
+
+  /**
+   * API tổng hợp nhánh 2: KPI + Chart + Upload + Share
+   * Xử lý tất cả: tính KPI, prepare chart data, upload và share file
+   */
+  @Public()
+  @Post('process-chart-and-upload')
+  async processChartAndUpload(
+    @Body()
+    body: {
+      chartUrl?: string; // URL từ QuickChart
+      chartImage?: string; // Base64 hoặc data URL của chart image
+      startDate?: string;
+      endDate?: string;
+      shareRole?: 'reader' | 'writer' | 'commenter';
+      shareType?: 'user' | 'group' | 'domain' | 'anyone';
+      emailAddress?: string;
+      folderId?: string; // Folder ID để lưu file (optional, sẽ đọc từ .env nếu không có)
+    },
+  ) {
+    const dateRange =
+      body.startDate && body.endDate
+        ? { start: body.startDate, end: body.endDate }
+        : undefined;
+
+    const shareOptions = {
+      role: body.shareRole,
+      type: body.shareType,
+      emailAddress: body.emailAddress,
+    };
+
+    return this.workflowService.processChartAndUpload(
+      body.chartUrl,
+      body.chartImage,
+      dateRange,
+      shareOptions,
+      body.folderId, // Truyền folderId nếu có
+    );
+  }
+
+  /**
+   * API tổng hợp - Gộp kết quả và gửi notifications (Slack và Gmail)
+   * Nhận kết quả từ 2 nhánh, merge và gửi Slack message + Email
+   */
+  @Public()
+  @Post('merge-and-send-notifications')
+  async mergeAndSendNotifications(
+    @Body()
+    body: {
+      aiReportResult?: any; // Kết quả từ process-ai-report
+      chartResult?: any; // Kết quả từ process-chart-and-upload
+      slackWebhookUrl?: string; // Slack Webhook URL
+      slackChannel?: string; // Slack channel (optional)
+      emailTo?: string | string[]; // Email người nhận
+      emailSubject?: string; // Subject email (optional)
+    },
+  ) {
+    return this.workflowService.sendNotifications(
+      body.aiReportResult,
+      body.chartResult,
+      body.slackWebhookUrl,
+      body.slackChannel,
+      body.emailTo,
+      body.emailSubject,
     );
   }
 
