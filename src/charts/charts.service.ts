@@ -84,7 +84,7 @@ export class ChartsService {
     };
   }
 
-  private groupTasksByWeek(tasks: { createdAt: Date; status: string }[]) {
+  private groupTasksByWeek(tasks: { createdAt: Date; status: string | null }[]) {
     const weekMap = new Map<string, { completed: number; total: number }>();
 
     tasks.forEach((task) => {
