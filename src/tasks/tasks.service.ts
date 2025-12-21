@@ -84,6 +84,105 @@ export class TasksService {
     return this.prisma.task.findUnique({ where: { id } });
   }
 
+  async updateJiraIssueIdAndSync(taskId: number, jiraIssueId: string): Promise<Task> {
+    try {
+      // 1. Lấy thông tin từ Jira
+      const jiraIssue = await this.workflowService.getJiraStatus({
+        issueKey: jiraIssueId,
+      });
+
+      if (!jiraIssue || !jiraIssue.issueKey) {
+        throw new Error(`Jira issue ${jiraIssueId} not found`);
+      }
+
+      // 2. Lấy task hiện tại
+      const currentTask = await this.prisma.task.findUnique({
+        where: { id: taskId },
+        include: {
+          project: true,
+        },
+      });
+
+      if (!currentTask) {
+        throw new Error(`Task ${taskId} not found`);
+      }
+
+      // 3. Map assignee từ Jira sang userId trong DB
+      let assignedToId: number | null = currentTask.assignedToId;
+
+      if (jiraIssue.assignee) {
+        // Tìm user theo email từ Jira
+        if (jiraIssue.assignee.email) {
+          const user = await this.prisma.user.findFirst({
+            where: { email: jiraIssue.assignee.email },
+          });
+          if (user) {
+            assignedToId = user.id;
+          }
+        }
+        // Nếu không tìm thấy theo email, thử tìm theo accountId (jiraUserId)
+        if (!assignedToId && jiraIssue.assignee.accountId) {
+          const user = await this.prisma.user.findFirst({
+            where: { jiraUserId: jiraIssue.assignee.accountId },
+          });
+          if (user) {
+            assignedToId = user.id;
+          }
+        }
+      }
+
+      // 4. Map status từ Jira
+      const jiraStatus = jiraIssue.status || currentTask.status;
+      
+      // Map Jira status to DB status
+      const statusMap: Record<string, string> = {
+        'To Do': 'To Do',
+        'In Progress': 'In Progress',
+        'In Review': 'Review',
+        'Review': 'Review',
+        'Done': 'Done',
+        'Resolved': 'Done',
+        'Closed': 'Done',
+      };
+      const mappedStatus = statusMap[jiraStatus] || jiraStatus;
+
+      // 5. Map priority từ Jira
+      const jiraPriority = jiraIssue.priority || currentTask.priority;
+
+      // 6. Update task với thông tin từ Jira
+      const updatedTask = await this.prisma.task.update({
+        where: { id: taskId },
+        data: {
+          jiraIssueId: jiraIssueId,
+          title: jiraIssue.summary || currentTask.title,
+          description: jiraIssue.description || currentTask.description,
+          status: mappedStatus,
+          priority: jiraPriority,
+          assignedToId: assignedToId,
+        },
+        include: {
+          project: true,
+          assignedTo: {
+            select: {
+              id: true,
+              username: true,
+              name: true,
+              email: true,
+            },
+          },
+        },
+      });
+
+      console.log(`✅ Updated task ${taskId} with Jira issue ${jiraIssueId}`);
+      console.log(`   Status: ${mappedStatus}, Priority: ${jiraPriority}, AssignedTo: ${assignedToId}`);
+
+      return updatedTask;
+    } catch (error: any) {
+      console.error(`❌ Failed to update task ${taskId} with Jira issue:`, error.message);
+      throw error;
+    }
+  }
+
   async getAllTasks() {
     return this.prisma.task.findMany({
       orderBy: {
