@@ -74,6 +74,15 @@ export class TasksService {
     return updatedTask;
   }
 
+  async updateJiraIssue(taskId: number, jiraIssueId: string): Promise<Task> {
+    return this.prisma.task.update({
+      where: { id: taskId },
+      data: {
+        jiraIssueId,
+      },
+    });
+  }
+
   async getAssignedTasks(userId: number): Promise<Task[]> {
     return await this.prisma.task.findMany({
       where: { assignedToId: userId },
@@ -149,11 +158,13 @@ export class TasksService {
       // 5. Map priority từ Jira
       const jiraPriority = jiraIssue.priority || currentTask.priority;
 
-      // 6. Update task với thông tin từ Jira
+      // 6. Update jiraIssueId trước bằng method updateJiraIssue
+      await this.updateJiraIssue(taskId, jiraIssueId);
+
+      // 7. Update các thông tin khác từ Jira
       const updatedTask = await this.prisma.task.update({
         where: { id: taskId },
         data: {
-          jiraIssueId: jiraIssueId,
           title: jiraIssue.summary || currentTask.title,
           description: jiraIssue.description || currentTask.description,
           status: mappedStatus,

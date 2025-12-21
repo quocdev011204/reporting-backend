@@ -2,6 +2,7 @@ import {
   Controller,
   Post,
   Put,
+  Patch,
   Get,
   Body,
   Param,
@@ -67,6 +68,21 @@ export class TasksController {
     }
     
     return this.tasksService.updateJiraIssueIdAndSync(Number(taskId), jiraIssueId);
+  }
+
+  @Public()
+  @Patch('jira')
+  async updateJiraIssue(
+    @Body()
+    body: {
+      task_id: number;
+      jira_issue_id: string;
+    },
+  ): Promise<Task> {
+    return this.tasksService.updateJiraIssue(
+      body.task_id,
+      body.jira_issue_id,
+    );
   }
 
   @Get('assigned-to/:userId')
