@@ -4,7 +4,7 @@ import { Public } from '../auth/public.decorator';
 
 @Controller('workflow')
 export class WorkflowController {
-  constructor(private readonly workflowService: WorkflowService) {}
+  constructor(private readonly workflowService: WorkflowService) { }
 
   /**
    * API để merge data từ Projects, Tasks, Team Members
@@ -325,6 +325,7 @@ export class WorkflowController {
       slackChannel?: string; // Slack channel (optional)
       emailTo?: string | string[]; // Email người nhận
       emailSubject?: string; // Subject email (optional)
+      documentId?: string; // Google Docs document ID (optional)
     },
   ) {
     return this.workflowService.sendNotifications(
@@ -334,6 +335,7 @@ export class WorkflowController {
       body.slackChannel,
       body.emailTo,
       body.emailSubject,
+      body.documentId,
     );
   }
 
@@ -344,11 +346,12 @@ export class WorkflowController {
   @Public()
   @Post('prepare-message')
   async prepareMessage(
-    @Body() body: { reportId?: number; aiResponse?: string },
+    @Body() body: { reportId?: number; aiResponse?: string; documentId?: string },
   ) {
     return this.workflowService.prepareMessageData(
       body.reportId,
       body.aiResponse,
+      body.documentId,
     );
   }
 

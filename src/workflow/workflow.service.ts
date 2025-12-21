@@ -7,6 +7,8 @@ import { ReportsService } from '../reports/reports.service';
 import axios from 'axios';
 import { google } from 'googleapis';
 import { Readable } from 'stream';
+import * as nodemailer from 'nodemailer';
+import { IncomingWebhook } from '@slack/webhook';
 
 @Injectable()
 export class WorkflowService {
@@ -770,7 +772,7 @@ ${csv}`;
   /**
    * Prepare data cho việc gửi message (sau khi AI xử lý)
    */
-  async prepareMessageData(reportId?: number, aiResponse?: string) {
+  async prepareMessageData(reportId?: number, aiResponse?: string, documentId?: string) {
     const data: any = {
       timestamp: new Date().toISOString(),
     };
@@ -799,6 +801,11 @@ ${csv}`;
 
     if (aiResponse) {
       data.aiResponse = aiResponse;
+    }
+
+    if (documentId) {
+      data.documentId = documentId;
+      data.documentUrl = `https://docs.google.com/document/d/${documentId}/edit`;
     }
 
     return data;
@@ -2852,13 +2859,24 @@ ${csv}`;
     slackChannel?: string,
     emailTo?: string | string[],
     emailSubject?: string,
+    documentId?: string, // Google Docs document ID
   ) {
     // Format message từ kết quả 2 nhánh
-    const timestamp = new Date().toLocaleString('vi-VN');
+    const timestamp = new Date().toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' });
+
 
     // Format cho Slack (Markdown)
-    let slackMessage = '📊 *Báo cáo Tổng hợp*\n\n';
+    let slackMessage = '';
 
+    // Nếu có documentId, hiển thị link Google Docs ở đầu
+    if (documentId) {
+      const documentUrl = `https://docs.google.com/document/d/${documentId}/edit`;
+      slackMessage = `🤖 *AI Analysis Report:*\n📄 *Báo cáo chi tiết:* ${documentUrl}\n\n`;
+    } else {
+      slackMessage = '📊 *Báo cáo Tổng hợp*\n\n';
+    }
+
+    // Luôn hiển thị summary nếu có dữ liệu
     if (aiReportResult) {
       slackMessage += '🤖 *AI Report:*\n';
       if (aiReportResult.prompt) {
@@ -2889,14 +2907,29 @@ ${csv}`;
       slackMessage += '\n';
     }
 
-    slackMessage += `⏰ Generated at: ${timestamp}`;
+    slackMessage += `📅 Generated: ${timestamp}\n | 🤖 AI Automated Reporting System`;
 
     // Format cho Email (HTML)
     let emailHtml = `
       <html>
         <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-          <h2 style="color: #4CAF50;">📊 Báo cáo Tổng hợp</h2>
+          <h2 style="color: #4CAF50;">📊 AI Analysis Report</h2>
     `;
+
+    // Nếu có documentId, hiển thị link báo cáo ở đầu
+    if (documentId) {
+      const documentUrl = `https://docs.google.com/document/d/${documentId}/edit`;
+      emailHtml += `
+        <div style="background: #E8F5E9; padding: 15px; border-radius: 5px; margin: 15px 0;">
+          <h3 style="color: #2E7D32; margin-top: 0;">📄 Báo cáo chi tiết</h3>
+          <p style="margin: 5px 0;">
+            <a href="${documentUrl}" style="color: #1976D2; text-decoration: none; font-weight: bold;">
+              ➜ Xem báo cáo đầy đủ tại Google Docs
+            </a>
+          </p>
+        </div>
+      `;
+    }
 
     if (aiReportResult) {
       emailHtml += `
@@ -2936,7 +2969,8 @@ ${csv}`;
 
     emailHtml += `
           <hr style="border: 1px solid #ddd; margin: 20px 0;">
-          <p style="color: #666; font-size: 12px;">⏰ Generated at: ${timestamp}</p>
+          <p style="color: #666; font-size: 12px;">📅 Generated: ${timestamp}</p>
+          <p style="color: #999; font-size: 11px;">🤖 AI Automated Reporting System</p>
         </body>
       </html>
     `;
@@ -2950,19 +2984,79 @@ ${chartResult ? `KPI & Chart:\n- Tổng dự án: ${chartResult.kpi?.projects?.t
 Generated at: ${timestamp}
     `.trim();
 
-    // TODO: Implement actual Slack API call
-    // const slackResponse = await axios.post(slackWebhookUrl, {
-    //   text: slackMessage,
-    //   channel: slackChannel,
-    // });
+    // Gửi Slack notification thực tế
+    let slackSent = false;
+    let slackError: string | undefined;
 
-    // TODO: Implement actual Email sending (using nodemailer, sendgrid, etc.)
-    // const emailResponse = await this.sendEmail({
-    //   to: emailTo,
-    //   subject: emailSubject || 'Báo cáo Tổng hợp',
-    //   html: emailHtml,
-    //   text: emailText,
-    // });
+    if (slackWebhookUrl) {
+      try {
+        const webhook = new IncomingWebhook(slackWebhookUrl);
+        await webhook.send({
+          text: slackMessage,
+        });
+        slackSent = true;
+        console.log('✅ Slack notification sent successfully');
+      } catch (error: any) {
+        slackError = error.message;
+        console.error('❌ Failed to send Slack notification:', error.message);
+      }
+    } else {
+      // Fallback: lấy từ .env nếu không truyền vào
+      const defaultWebhookUrl = this.configService.get<string>('SLACK_WEBHOOK_URL');
+      if (defaultWebhookUrl) {
+        try {
+          const webhook = new IncomingWebhook(defaultWebhookUrl);
+          await webhook.send({
+            text: slackMessage,
+          });
+          slackSent = true;
+          console.log('✅ Slack notification sent successfully (using default webhook)');
+        } catch (error: any) {
+          slackError = error.message;
+          console.error('❌ Failed to send Slack notification:', error.message);
+        }
+      }
+    }
+
+    // Gửi Email notification thực tế
+    let emailSent = false;
+    let emailError: string | undefined;
+
+    // Lấy email admin từ .env hoặc từ parameter
+    const adminEmail = this.configService.get<string>('EMAIL_ADMIN');
+    const recipients = emailTo
+      ? (Array.isArray(emailTo) ? emailTo : [emailTo])
+      : (adminEmail ? [adminEmail] : []);
+
+    if (recipients.length > 0) {
+      try {
+        // Tạo nodemailer transporter
+        const transporter = nodemailer.createTransport({
+          host: this.configService.get<string>('SMTP_HOST'),
+          port: this.configService.get<number>('SMTP_PORT'),
+          secure: this.configService.get<string>('SMTP_SECURE') === 'true', // true for 465, false for other ports
+          auth: {
+            user: this.configService.get<string>('SMTP_USER'),
+            pass: this.configService.get<string>('SMTP_PASS'),
+          },
+        });
+
+        // Gửi email
+        await transporter.sendMail({
+          from: this.configService.get<string>('EMAIL_FROM') || this.configService.get<string>('SMTP_USER'),
+          to: recipients.join(', '),
+          subject: emailSubject || '📊 AI Analysis Report - Báo cáo Tổng hợp',
+          html: emailHtml,
+          text: emailText,
+        });
+
+        emailSent = true;
+        console.log('✅ Email sent successfully to:', recipients.join(', '));
+      } catch (error: any) {
+        emailError = error.message;
+        console.error('❌ Failed to send email:', error.message);
+      }
+    }
 
     return {
       success: true,
@@ -2970,17 +3064,18 @@ Generated at: ${timestamp}
         message: slackMessage,
         webhookUrl: slackWebhookUrl,
         channel: slackChannel,
-        sent: !!slackWebhookUrl,
+        sent: slackSent,
+        error: slackError,
       },
       email: {
-        to: Array.isArray(emailTo) ? emailTo : emailTo ? [emailTo] : [],
-        subject: emailSubject || 'Báo cáo Tổng hợp',
+        to: recipients,
+        subject: emailSubject || '📊 AI Analysis Report - Báo cáo Tổng hợp',
         html: emailHtml,
         text: emailText,
-        sent: !!emailTo,
+        sent: emailSent,
+        error: emailError,
       },
       sentAt: new Date().toISOString(),
-      // Có thể thêm logic gửi thực tế ở đây khi có credentials
     };
   }
 
