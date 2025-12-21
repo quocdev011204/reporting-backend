@@ -7,6 +7,8 @@ import {
   Body,
   Param,
   UseGuards,
+  HttpException,
+  HttpStatus,
 } from '@nestjs/common';
 import { TasksService } from './tasks.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
@@ -75,14 +77,45 @@ export class TasksController {
   async updateJiraIssue(
     @Body()
     body: {
-      task_id: number;
-      jira_issue_id: string;
+      task_id?: number | string;
+      jira_issue_id?: string;
     },
   ): Promise<Task> {
-    return this.tasksService.updateJiraIssue(
-      body.task_id,
-      body.jira_issue_id,
-    );
+    // Hỗ trợ cả string và number cho task_id
+    const taskId = body.task_id ? Number(body.task_id) : null;
+    const jiraIssueId = body.jira_issue_id;
+
+    if (!taskId || isNaN(taskId)) {
+      throw new HttpException(
+        'task_id is required and must be a valid number',
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+
+    if (!jiraIssueId) {
+      throw new HttpException(
+        'jira_issue_id is required',
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+
+    try {
+      return await this.tasksService.updateJiraIssue(taskId, jiraIssueId);
+    } catch (error: any) {
+      // Nếu task không tồn tại, Prisma sẽ throw error
+      if (error.code === 'P2025') {
+        throw new HttpException(
+          `Task with id ${taskId} not found`,
+          HttpStatus.NOT_FOUND,
+        );
+      }
+      // Log error để debug
+      console.error('Error updating Jira issue:', error);
+      throw new HttpException(
+        error.message || 'Failed to update Jira issue',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
   }
 
   @Get('assigned-to/:userId')
@@ -103,6 +136,7 @@ export class TasksController {
   //   );
   // }
 
+  // Route này phải đặt cuối cùng để tránh conflict với các route cụ thể
   @Get(':id')
   @UseGuards(JwtAuthGuard)
   async getTaskById(@Param('id') id: string): Promise<Task | null> {
