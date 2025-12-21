@@ -146,6 +146,7 @@ export class WorkflowController {
       createGoogleDoc?: boolean; // Tạo Google Docs document
       googleDocFolderId?: string; // Folder ID để lưu Google Docs
       reportType?: 'daily' | 'weekly'; // Loại báo cáo: daily hoặc weekly
+      chartUploadResult?: any; // Kết quả từ process-chart-and-upload (có upload, share, urls)
     },
   ) {
     const dateRange =
@@ -158,6 +159,7 @@ export class WorkflowController {
       body.createGoogleDoc || false,
       body.googleDocFolderId,
       body.reportType || 'daily',
+      body.chartUploadResult, // Truyền chartUploadResult để chèn chart vào document
     );
   }
 
@@ -275,6 +277,7 @@ export class WorkflowController {
       shareType?: 'user' | 'group' | 'domain' | 'anyone';
       emailAddress?: string;
       folderId?: string; // Folder ID để lưu file (optional, sẽ đọc từ .env nếu không có)
+      reportType?: 'daily' | 'weekly'; // Report type để truyền qua cho Process AI Report
     },
   ) {
     const dateRange =
@@ -288,13 +291,23 @@ export class WorkflowController {
       emailAddress: body.emailAddress,
     };
 
-    return this.workflowService.processChartAndUpload(
+    const result = await this.workflowService.processChartAndUpload(
       body.chartUrl,
       body.chartImage,
       dateRange,
       shareOptions,
       body.folderId, // Truyền folderId nếu có
     );
+
+    // Thêm reportType vào response để truyền qua cho Process AI Report
+    if (body.reportType) {
+      return {
+        ...result,
+        reportType: body.reportType,
+      };
+    }
+
+    return result;
   }
 
   /**
@@ -336,6 +349,28 @@ export class WorkflowController {
     return this.workflowService.prepareMessageData(
       body.reportId,
       body.aiResponse,
+    );
+  }
+
+  /**
+   * API để chèn ảnh vào Google Docs document đã tồn tại
+   * Dùng cho n8n workflow khi document đã được tạo trước đó
+   * Ví dụ: Sau khi tạo document, upload chart, sau đó chèn chart vào document
+   */
+  @Public()
+  @Post('insert-image-to-doc')
+  async insertImageToDoc(
+    @Body()
+    body: {
+      documentId: string; // Google Docs document ID
+      chartUrl: string; // Google Drive URL của chart image
+      insertAfterIndex?: number; // Vị trí chèn (optional, tự động tìm nếu không có)
+    },
+  ) {
+    return this.workflowService.insertImageToGoogleDocs(
+      body.documentId,
+      body.chartUrl,
+      body.insertAfterIndex,
     );
   }
 }

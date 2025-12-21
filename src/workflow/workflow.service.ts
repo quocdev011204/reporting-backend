@@ -6,6 +6,7 @@ import { ChartsService } from '../charts/charts.service';
 import { ReportsService } from '../reports/reports.service';
 import axios from 'axios';
 import { google } from 'googleapis';
+import { Readable } from 'stream';
 
 @Injectable()
 export class WorkflowService {
@@ -15,7 +16,7 @@ export class WorkflowService {
     private chartsService: ChartsService,
     private reportsService: ReportsService,
     private configService: ConfigService,
-  ) {}
+  ) { }
 
   /**
    * Merge data từ Projects, Tasks, và Team Members
@@ -146,7 +147,7 @@ export class WorkflowService {
   ): string {
     const reportType = isDaily ? 'Daily' : 'Weekly';
     const timeScope = isDaily ? 'ngày hôm nay' : 'tuần này';
-    
+
     if (isDaily) {
       // Template Daily Report - Ngắn gọn, tập trung vào hành động ngay
       return `Bạn là Project Manager chuyên nghiệp. Tạo báo cáo Daily Standup theo chuẩn PM/Executive.
@@ -529,6 +530,7 @@ ${csv}`;
     createGoogleDoc?: boolean,
     googleDocFolderId?: string,
     reportType: 'daily' | 'weekly' = 'daily',
+    chartUploadResult?: any, // Kết quả từ process-chart-and-upload (có upload, share, urls)
   ) {
     // 1. Tự lấy data từ database và build prompt
     const promptData = await this.buildPrompt(chartUrl, dateRange, reportType);
@@ -585,16 +587,37 @@ ${csv}`;
 
     // 5. Tạo Google Docs document nếu được yêu cầu
     let googleDoc: any = null;
+
+    // Lấy chart URL từ chartUploadResult nếu có (ưu tiên URL từ Google Drive đã upload)
+    // Ưu tiên imageUrl vì đây là URL trực tiếp để chèn vào Google Docs
+    const finalChartUrl = chartUploadResult?.urls?.imageUrl ||
+      chartUploadResult?.urls?.shareUrl ||
+      chartUploadResult?.chartUrl ||
+      chartUploadResult?.share?.shareUrl ||
+      chartUrl;
+
     if (createGoogleDoc) {
       try {
         // Nếu không truyền googleDocFolderId, đọc từ .env
         const folderId =
           googleDocFolderId ||
           this.configService.get<string>('GOOGLE_DRIVE_FOLDER_ID');
+
+        console.log('📊 Chart URL for insertion:', finalChartUrl ? 'YES' : 'NO', finalChartUrl);
+        console.log('📊 Chart URL source:', {
+          'urls.imageUrl': chartUploadResult?.urls?.imageUrl,
+          'urls.shareUrl': chartUploadResult?.urls?.shareUrl,
+          'chartUrl': chartUploadResult?.chartUrl,
+          'share.shareUrl': chartUploadResult?.share?.shareUrl,
+          'chartUrl (param)': chartUrl,
+          'finalChartUrl': finalChartUrl,
+        });
+
         googleDoc = await this.createGoogleDocsDocument(
           reportTitle,
           reportContent,
           folderId,
+          finalChartUrl, // Truyền finalChartUrl để createGoogleDocsDocument tự chèn ảnh
         );
       } catch (error: any) {
         console.error('Failed to create Google Docs:', error.message);
@@ -642,6 +665,29 @@ ${csv}`;
           updatedContent,
         );
         googleDoc.updatedAt = new Date().toISOString();
+
+        // Chèn lại chart sau khi update document (vì updateGoogleDocsDocument xóa tất cả nội dung cũ)
+        if (finalChartUrl) {
+          try {
+            console.log('📸 Re-inserting chart image after document update...');
+
+            const reinsertResult = await this.insertImageToGoogleDocs(
+              googleDoc.documentId,
+              finalChartUrl,
+            );
+
+            if (reinsertResult.success) {
+              console.log('✅ Chart image re-inserted successfully after update!');
+              googleDoc.chartInserted = true;
+              googleDoc.chartFormat = reinsertResult.format;
+              googleDoc.chartObjectId = reinsertResult.objectId;
+            }
+          } catch (imageError: any) {
+            console.warn('⚠️ Failed to re-insert chart after update:', imageError.message);
+            googleDoc.chartInserted = false;
+            googleDoc.chartInsertError = imageError.message;
+          }
+        }
       } catch (error: any) {
         console.error('Failed to update Google Docs:', error.message);
       }
@@ -704,12 +750,13 @@ ${csv}`;
       content += `${cleanSummary}\n\n`;
     }
 
-    // Chart URL
-    if (chartUrl) {
-      content += `Biểu đồ KPI: ${chartUrl}\n\n`;
-    }
+    // Chart URL - KHÔNG chèn vào content text vì sẽ được chèn dưới dạng image trong insertFormattedContent
+    // if (chartUrl) {
+    //   content += `Biểu đồ KPI: ${chartUrl}\n\n`;
+    // }
 
     // Footer - Generated at và Report ID cùng dòng, Report ID ở bên phải
+    // Footer sẽ được đặt Ở TRƯỚC chart, sau đó insertImageToGoogleDocs sẽ chèn chart VÀ DI CHUYỂN footer xuống dưới
     content += ``;
     if (reportId) {
       content += `Generated at: ${new Date().toLocaleString('vi-VN')} --- Report ID: ${reportId}\n`;
@@ -768,7 +815,7 @@ ${csv}`;
       const redirectUri =
         this.configService.get<string>('GOOGLE_OAUTH_REDIRECT_URI') ||
         `${this.configService.get<string>('APP_URL') || 'http://localhost:3000'}/auth/google/callback`;
-      
+
       const oauth2Client = new google.auth.OAuth2(
         clientId,
         clientSecret,
@@ -803,6 +850,7 @@ ${csv}`;
     title: string,
     content: string,
     folderId?: string,
+    chartUrl?: string, // URL của chart để chèn vào document
   ) {
     // Các biến cần dùng cả trong try và catch
     let useFolderId = folderId;
@@ -813,9 +861,9 @@ ${csv}`;
       const auth = await this.getGoogleAuth();
       const docs = google.docs({ version: 'v1', auth });
       const drive = google.drive({ version: 'v3', auth });
-      
+
       let folderOwnerEmail: string | null = null;
-      
+
       if (folderId) {
         try {
           const folderInfo = await drive.files.get({
@@ -829,7 +877,7 @@ ${csv}`;
         } catch (folderError: any) {
           // Nếu folder không truy cập được (404 hoặc 403), fallback tạo ở root Drive
           if (
-            folderError.code === 404 || 
+            folderError.code === 404 ||
             folderError.code === 403 ||
             folderError.message?.includes('not found') ||
             folderError.message?.includes('permission') ||
@@ -869,7 +917,7 @@ ${csv}`;
           createErrorMessage?.toLowerCase().includes('quota') ||
           createErrorMessage?.toLowerCase().includes('storage quota') ||
           createErrorMessage?.toLowerCase().includes('exceeded');
-        
+
         const isFolderPermissionError =
           createError.code === 403 ||
           createError.code === 404 ||
@@ -891,7 +939,7 @@ ${csv}`;
           folderWarning = isQuotaError
             ? `Folder "${folderId}" has quota issues. Document created in service account's root Drive instead.`
             : `Folder "${folderId}" not accessible. Document created in service account's root Drive instead.`;
-          
+
           try {
             file = await drive.files.create({
               requestBody: retryMetadata,
@@ -918,9 +966,13 @@ ${csv}`;
       }
 
       // Insert và format content với màu sắc và styling đẹp
-      await this.insertFormattedContent(docs, documentId, content);
+      await this.insertFormattedContent(docs, documentId, content, undefined); // Không truyền chartUrl vào đây
+
+      // Đợi một chút để đảm bảo document đã được format xong hoàn toàn
+      await new Promise(resolve => setTimeout(resolve, 2000));
 
       // Transfer ownership sang folder owner để giải phóng quota của service account
+      // Làm TRƯỚC khi chèn chart để đảm bảo quyền truy cập đúng
       // Điều này đặc biệt quan trọng với personal Gmail (không có domain-wide delegation)
       if (folderOwnerEmail && folderOwnerEmail !== serviceAccountEmail) {
         try {
@@ -935,12 +987,29 @@ ${csv}`;
             transferOwnership: true, // Transfer ownership parameter ở ngoài requestBody
           });
           console.log(`Transferred ownership to folder owner: ${folderOwnerEmail}`);
+          // Đợi một chút sau khi transfer ownership để đảm bảo quyền đã được apply
+          await new Promise(resolve => setTimeout(resolve, 1000));
         } catch (transferError: any) {
           // Nếu transfer ownership fail, chỉ log warning, không throw error
           // Vì file đã được tạo thành công
           console.warn(
             `Failed to transfer ownership to ${folderOwnerEmail}: ${transferError.message}`,
           );
+        }
+      }
+
+      // Chèn chart image SAU KHI transfer ownership (sử dụng logic đã được test và hoạt động tốt)
+      // Điều này đảm bảo document đã được format xong và quyền đã được set đúng
+      if (chartUrl) {
+        try {
+          console.log('📸 Auto-inserting chart image after content formatting and ownership transfer...');
+          console.log('   Chart URL:', chartUrl);
+          await this.insertImageToGoogleDocs(documentId, chartUrl);
+          console.log('✅ Chart image auto-inserted successfully!');
+        } catch (imageError: any) {
+          console.warn('⚠️ Failed to auto-insert chart image:', imageError.message);
+          console.warn('   Document created successfully, but chart was not inserted.');
+          // Không throw error, chỉ log warning vì document đã được tạo thành công
         }
       }
 
@@ -959,7 +1028,7 @@ ${csv}`;
       const errorDetails = error.response?.data
         ? JSON.stringify(error.response.data)
         : errorMessage;
-      
+
       // Log chi tiết để debug
       console.error('Google Docs creation error:', {
         message: errorMessage,
@@ -974,8 +1043,8 @@ ${csv}`;
         errorMessage?.toLowerCase().includes('quota') ||
         errorMessage?.toLowerCase().includes('storage quota') ||
         errorMessage?.toLowerCase().includes('exceeded');
-      
-      const isFolderPermissionError = 
+
+      const isFolderPermissionError =
         error.code === 403 ||
         error.code === 404 ||
         errorMessage?.includes('not found') ||
@@ -986,7 +1055,7 @@ ${csv}`;
       if (isQuotaError) {
         const impersonateUser = this.configService.get<string>('GOOGLE_IMPERSONATE_USER');
         let solutionMessage = '';
-        
+
         if (!impersonateUser) {
           solutionMessage = `\n\nSOLUTION: Add GOOGLE_IMPERSONATE_USER to .env file to use domain-wide delegation:\n` +
             `GOOGLE_IMPERSONATE_USER=your-email@yourdomain.com\n\n` +
@@ -996,7 +1065,7 @@ ${csv}`;
           solutionMessage = `\n\nCurrent impersonate user: ${impersonateUser}\n` +
             `If this user also has quota issues, try a different user account with more storage.`;
         }
-        
+
         throw new Error(
           `Failed to create Google Docs: Service Account's Drive storage quota has been exceeded.` +
           `\nThe quota is calculated based on the Service Account's own Drive storage (${serviceAccountEmail}), not the folder owner's storage.` +
@@ -1023,6 +1092,7 @@ ${csv}`;
     docs: any,
     documentId: string,
     content: string,
+    chartUrl?: string, // URL của chart để chèn vào document
   ) {
     // Bước 1: Insert tất cả text trước
     await docs.documents.batchUpdate({
@@ -1049,7 +1119,7 @@ ${csv}`;
       const line = lines[i];
       const lineStart = currentIndex;
       const lineEnd = currentIndex + line.length;
-      
+
       // Skip empty lines
       if (!line.trim() && i < lines.length - 1) {
         currentIndex = lineEnd + 1; // +1 for newline
@@ -1536,6 +1606,553 @@ ${csv}`;
         console.warn('Format error details:', formatError);
       }
     }
+
+    // Bước 4: Chèn chart image nếu có chartUrl
+    console.log('🔍 Checking chartUrl for image insertion:', chartUrl ? 'YES' : 'NO', chartUrl);
+    if (chartUrl) {
+      try {
+        console.log('📸 Starting chart image insertion process...');
+        // Lấy document để tìm vị trí chèn chart (sau title và subtitle)
+        const document = await docs.documents.get({
+          documentId: documentId,
+        });
+
+        // Tìm vị trí tốt nhất để chèn chart (sau title và subtitle)
+        let insertIndex = 1;
+        const body = document.data.body;
+        if (body && body.content && body.content.length > 0) {
+          // Tìm paragraph đầu tiên có text (thường là title)
+          // Sau đó tìm paragraph tiếp theo để chèn chart
+          let foundFirstParagraph = false;
+          for (const element of body.content) {
+            if (element.paragraph) {
+              const paragraph = element.paragraph;
+              // Kiểm tra xem paragraph có text không
+              const hasText = paragraph.elements?.some(
+                (el: any) => el.textRun && el.textRun.content?.trim(),
+              );
+
+              if (hasText) {
+                if (!foundFirstParagraph) {
+                  foundFirstParagraph = true;
+                  // Tìm paragraph tiếp theo để chèn chart
+                  continue;
+                } else {
+                  // Đây là paragraph thứ 2 có text, chèn chart trước nó
+                  insertIndex = element.startIndex || element.endIndex - 1;
+                  break;
+                }
+              }
+            }
+          }
+
+          // Nếu không tìm thấy vị trí phù hợp, chèn sau content cuối cùng
+          if (insertIndex === 1 && body.content.length > 0) {
+            const lastElement = body.content[body.content.length - 1];
+            insertIndex = lastElement.endIndex - 1;
+          }
+        }
+
+        // Extract fileId từ Google Drive URL
+        // Hỗ trợ nhiều formats:
+        // 1. https://drive.google.com/file/d/FILE_ID/view?usp=sharing
+        // 2. https://drive.google.com/uc?export=view&id=FILE_ID
+        // 3. https://drive.google.com/uc?id=FILE_ID
+        let fileId: string | null = null;
+
+        // Thử match format 1: /file/d/FILE_ID
+        const fileIdMatch1 = chartUrl.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
+        if (fileIdMatch1) {
+          fileId = fileIdMatch1[1];
+        } else {
+          // Thử match format 2: ?id=FILE_ID hoặc &id=FILE_ID
+          const fileIdMatch2 = chartUrl.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+          if (fileIdMatch2) {
+            fileId = fileIdMatch2[1];
+          }
+        }
+
+        if (!fileId) {
+          console.warn('Chart URL is not a valid Google Drive URL, cannot extract file ID:', chartUrl);
+          return;
+        }
+
+        console.log('✅ Extracted file ID from chartUrl:', fileId, '(from URL:', chartUrl, ')');
+
+        // Lấy Google Drive API để đảm bảo file đã được share public
+        console.log('🔐 Getting Google Auth for Drive API...');
+        const auth = await this.getGoogleAuth();
+        const drive = google.drive({ version: 'v3', auth });
+        console.log('✅ Google Drive API initialized');
+
+        try {
+          // Kiểm tra và đảm bảo file đã được share public
+          const fileInfo = await drive.files.get({
+            fileId: fileId,
+            fields: 'id,name,permissions,webViewLink,mimeType',
+          });
+
+          // Kiểm tra xem file đã được share với anyone chưa
+          let isPublic = false;
+          if (fileInfo.data.permissions) {
+            isPublic = fileInfo.data.permissions.some(
+              (p: any) => p.type === 'anyone' && p.role !== undefined,
+            );
+          }
+
+          // Nếu chưa public, share với anyone
+          if (!isPublic) {
+            try {
+              await drive.permissions.create({
+                fileId: fileId,
+                requestBody: {
+                  role: 'reader',
+                  type: 'anyone',
+                },
+              });
+              console.log('Chart file shared publicly for Google Docs insertion');
+            } catch (shareError: any) {
+              console.warn('Failed to share chart file publicly:', shareError.message);
+              // Vẫn tiếp tục thử chèn ảnh, có thể file đã được share qua folder
+            }
+          }
+
+          // Đợi một chút để đảm bảo permission được apply (nếu vừa share)
+          if (!isPublic) {
+            await new Promise(resolve => setTimeout(resolve, 2000));
+          }
+
+          // Verify file đã được share public
+          const verifyFile = await drive.files.get({
+            fileId: fileId,
+            fields: 'id,name,permissions,webViewLink',
+          });
+
+          const isFilePublic = verifyFile.data.permissions?.some(
+            (p: any) => p.type === 'anyone' && p.role !== undefined,
+          );
+          console.log('🔍 File public verification:', isFilePublic ? '✅ Public' : '❌ Not public');
+
+          // Google Docs API insertInlineImage yêu cầu URL công khai và URL phải < 2KB
+          // Data URI quá lớn (60KB+), không thể dùng được
+          // Giải pháp: Sử dụng Google Drive direct image URL (file đã được share public)
+          // Thử nhiều format URL khác nhau để tìm format hoạt động
+
+          // Danh sách các Google Drive URL formats để thử (theo thứ tự ưu tiên)
+          // Tất cả đều < 2KB và file đã được share public
+          const urlFormats: Array<{ name: string; uri: string }> = [
+            {
+              name: 'thumbnail-large',
+              uri: `https://drive.google.com/thumbnail?id=${fileId}&sz=w625-h309`
+            },
+            {
+              name: 'thumbnail-medium',
+              uri: `https://drive.google.com/thumbnail?id=${fileId}&sz=w700-h400`
+            },
+            {
+              name: 'simple-uc',
+              uri: `https://drive.google.com/uc?id=${fileId}`
+            },
+            {
+              name: 'export-view',
+              uri: `https://drive.google.com/uc?export=view&id=${fileId}`
+            },
+            {
+              name: 'lh3-googleusercontent',
+              uri: `https://lh3.googleusercontent.com/d/${fileId}`
+            },
+          ];
+
+          console.log('🖼️ Available URL formats for testing:');
+          urlFormats.forEach((format, index) => {
+            console.log(`   ${index + 1}. ${format.name}: ${format.uri} (${format.uri.length} chars)`);
+          });
+
+          // Chèn text marker, image, và text sau
+          const textMarker = '\n\n📊 Biểu đồ KPI:\n\n';
+          const textAfter = '\n\n';
+          const textMarkerLength = textMarker.length;
+
+          console.log('📍 Initial insert index:', insertIndex);
+
+          let inserted = false;
+          let lastError: any = null;
+
+          // Thử từng format cho đến khi thành công
+          for (const format of urlFormats) {
+            try {
+              console.log(`\n🔄 Trying format: ${format.name} - ${format.uri}`);
+
+              // BƯỚC 1: Chèn text marker trước
+              console.log('📤 Step 1: Inserting text marker at index', insertIndex);
+              await docs.documents.batchUpdate({
+                documentId: documentId,
+                requestBody: {
+                  requests: [
+                    {
+                      insertText: {
+                        location: { index: insertIndex },
+                        text: textMarker,
+                      },
+                    },
+                  ],
+                },
+              });
+
+              // Tính index sau khi chèn text marker
+              const imageInsertIndex = insertIndex + textMarkerLength;
+              console.log('📍 Image insert index (after text marker):', imageInsertIndex);
+
+              // BƯỚC 2: Chèn image bằng Google Drive URL
+              console.log('📤 Step 2: Inserting image using Google Drive URL...');
+              console.log('   - Document ID:', documentId);
+              console.log('   - Image insert index:', imageInsertIndex);
+              console.log('   - URL format:', format.name);
+              console.log('   - URL length:', format.uri.length, 'chars (< 2KB limit)');
+
+              const imageInsertResponse = await docs.documents.batchUpdate({
+                documentId: documentId,
+                requestBody: {
+                  requests: [
+                    {
+                      insertInlineImage: {
+                        location: { index: imageInsertIndex },
+                        uri: format.uri,
+                        objectSize: {
+                          height: {
+                            magnitude: 400,
+                            unit: 'PT',
+                          },
+                          width: {
+                            magnitude: 700,
+                            unit: 'PT',
+                          },
+                        },
+                      },
+                    },
+                  ],
+                },
+              });
+
+              console.log('📥 Image insert response:', JSON.stringify(imageInsertResponse.data, null, 2));
+
+              // Kiểm tra response để xem ảnh có được chèn thành công không
+              const insertResponse = imageInsertResponse.data.replies?.[0]?.insertInlineImage;
+              if (insertResponse?.objectId) {
+                console.log(`✅ SUCCESS with format "${format.name}"! Chart image inserted successfully!`);
+                console.log(`   - Object ID: ${insertResponse.objectId}`);
+                console.log(`   - Inserted at index: ${imageInsertIndex}`);
+
+                // Verify image đã được insert vào document
+                console.log('🔍 Verifying image in document structure...');
+                await new Promise(resolve => setTimeout(resolve, 2000)); // Đợi 2 giây để Google Docs xử lý
+
+                try {
+                  const verifyDoc = await docs.documents.get({
+                    documentId: documentId,
+                    suggestionsViewMode: 'PREVIEW_WITHOUT_SUGGESTIONS',
+                  });
+
+                  // Tìm image object trong document
+                  let imageFound = false;
+                  const body = verifyDoc.data.body;
+                  if (body?.content) {
+                    for (const element of body.content) {
+                      if (element.inlineObjectElement) {
+                        const inlineObjectId = element.inlineObjectElement.inlineObjectId;
+                        if (inlineObjectId === insertResponse.objectId) {
+                          imageFound = true;
+                          console.log('✅ Image object found in document structure at index:', element.startIndex);
+                          console.log('   - Inline object ID:', inlineObjectId);
+                          break;
+                        }
+                      }
+                    }
+
+                    // Log tất cả inline objects để debug
+                    const allInlineObjects = body.content
+                      .filter((el: any) => el.inlineObjectElement)
+                      .map((el: any) => ({
+                        startIndex: el.startIndex,
+                        endIndex: el.endIndex,
+                        inlineObjectId: el.inlineObjectElement?.inlineObjectId,
+                      }));
+                    console.log('📋 All inline objects in document:', JSON.stringify(allInlineObjects, null, 2));
+                  }
+
+                  if (!imageFound) {
+                    console.warn('⚠️ Image objectId exists but not found in document structure immediately.');
+                    console.warn('   This may be normal - Google Docs may need time to process the image.');
+                    console.warn('   Please check the document manually after a few seconds.');
+                  }
+                } catch (verifyError: any) {
+                  console.warn('⚠️ Failed to verify image in document:', verifyError.message);
+                }
+
+                // BƯỚC 3: Chèn text sau image
+                // Image object chiếm 1 index trong document
+                const textAfterIndex = imageInsertIndex + 1;
+                console.log('📤 Step 3: Inserting text after image at index:', textAfterIndex);
+
+                await docs.documents.batchUpdate({
+                  documentId: documentId,
+                  requestBody: {
+                    requests: [
+                      {
+                        insertText: {
+                          location: { index: textAfterIndex },
+                          text: textAfter,
+                        },
+                      },
+                    ],
+                  },
+                });
+
+                console.log('✅ Chart image insertion completed successfully!');
+                inserted = true;
+                break; // Thành công, dừng thử các format khác
+              } else {
+                // Kiểm tra xem có error không
+                const error = imageInsertResponse.data.replies?.[0]?.error;
+                if (error) {
+                  console.error(`❌ Format "${format.name}" failed with error:`, JSON.stringify(error));
+                  lastError = error;
+                } else {
+                  console.warn(`⚠️ Format "${format.name}" - No objectId in response:`, JSON.stringify(imageInsertResponse.data.replies));
+                  lastError = { message: 'No objectId in response' };
+                }
+              }
+            } catch (formatError: any) {
+              console.error(`❌ Format "${format.name}" threw error:`, formatError.message);
+              console.error('Error stack:', formatError.stack);
+              lastError = formatError;
+              continue; // Thử format tiếp theo
+            }
+          }
+
+          if (!inserted) {
+            console.error('❌ All URL formats failed to insert image');
+            console.error('Last error:', lastError);
+            console.warn('⚠️ Image insertion failed, but document was created successfully.');
+            console.warn('   You may need to manually insert the image or use a different hosting service.');
+            // Không throw error, chỉ log warning vì document đã được tạo thành công
+          }
+        } catch (driveError: any) {
+          console.error('❌ Failed to download and insert chart image:', driveError.message);
+          console.error('Error details:', driveError);
+          // Không throw error, chỉ log warning vì document đã được tạo thành công
+        }
+      } catch (imageError: any) {
+        console.warn('Failed to insert chart image:', imageError.message);
+        console.warn('Error details:', imageError);
+        // Không throw error, chỉ log warning vì document đã được tạo thành công
+      }
+    }
+  }
+
+  /**
+   * Chèn ảnh vào Google Docs document đã tồn tại
+   * Dùng cho n8n workflow khi document đã được tạo trước đó
+   */
+  async insertImageToGoogleDocs(
+    documentId: string,
+    chartUrl: string,
+    insertAfterIndex?: number,
+  ) {
+    try {
+      const auth = await this.getGoogleAuth();
+      const docs = google.docs({ version: 'v1', auth });
+      const drive = google.drive({ version: 'v3', auth });
+
+      // Extract file ID từ chartUrl
+      let fileId: string | null = null;
+      const fileIdMatch1 = chartUrl.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
+      if (fileIdMatch1) {
+        fileId = fileIdMatch1[1];
+      } else {
+        const fileIdMatch2 = chartUrl.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+        if (fileIdMatch2) {
+          fileId = fileIdMatch2[1];
+        }
+      }
+
+      if (!fileId) {
+        throw new Error('Cannot extract file ID from chartUrl');
+      }
+
+      // Đảm bảo file đã được share public
+      const fileInfo = await drive.files.get({
+        fileId: fileId,
+        fields: 'id,name,permissions',
+      });
+
+      let isPublic = false;
+      if (fileInfo.data.permissions) {
+        isPublic = fileInfo.data.permissions.some(
+          (p: any) => p.type === 'anyone' && p.role !== undefined,
+        );
+      }
+
+      if (!isPublic) {
+        await drive.permissions.create({
+          fileId: fileId,
+          requestBody: {
+            role: 'reader',
+            type: 'anyone',
+          },
+        });
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
+
+      // Lấy document để tìm vị trí chèn
+      const document = await docs.documents.get({
+        documentId: documentId,
+      });
+
+      // Tìm vị trí chèn (sử dụng insertAfterIndex nếu có, nếu không tự động tìm)
+      let insertIndex = insertAfterIndex || 1;
+      if (!insertAfterIndex) {
+        const body = document.data.body;
+        if (body && body.content && body.content.length > 0) {
+          let foundFooter = false;
+
+          // Tìm footer text "Generated at:" để chèn ảnh TRƯỚC footer
+          for (const element of body.content) {
+            if (element.paragraph) {
+              const paragraph = element.paragraph;
+              const hasFooterText = paragraph.elements?.some(
+                (el: any) =>
+                  el.textRun && el.textRun.content?.includes('Generated at:')
+              );
+
+              if (hasFooterText && element.startIndex) {
+                // Chèn TRƯỚC footer (tại startIndex của footer)
+                insertIndex = element.startIndex;
+                foundFooter = true;
+                console.log('🔍 Footer found at index:', insertIndex);
+                break;
+              }
+            }
+          }
+
+          // Nếu không tìm thấy footer, fallback về logic cũ (chèn ở cuối document)
+          if (!foundFooter && body.content.length > 0) {
+            const lastElement = body.content[body.content.length - 1];
+            insertIndex = lastElement.endIndex ? lastElement.endIndex - 1 : insertIndex;
+          }
+        }
+      }
+
+      // Danh sách các Google Drive URL formats để thử
+      const urlFormats: Array<{ name: string; uri: string }> = [
+        {
+          name: 'thumbnail-large',
+          uri: `https://drive.google.com/thumbnail?id=${fileId}&sz=w625-h309`,
+        },
+        // {
+        //   name: 'thumbnail-medium',
+        //   uri: `https://drive.google.com/thumbnail?id=${fileId}&sz=w700-h400`,
+        // },
+        // {
+        //   name: 'simple-uc',
+        //   uri: `https://drive.google.com/uc?id=${fileId}`,
+        // },
+        {
+          name: 'export-view',
+          uri: `https://drive.google.com/uc?export=view&id=${fileId}`,
+        },
+        {
+          name: 'lh3-googleusercontent',
+          uri: `https://lh3.googleusercontent.com/d/${fileId}`,
+        },
+      ];
+
+      const textMarker = '📊 Biểu đồ KPI:\n\n';
+      const textAfter = '\n\n';
+      const textMarkerLength = textMarker.length;
+
+      // Chèn text marker
+      await docs.documents.batchUpdate({
+        documentId: documentId,
+        requestBody: {
+          requests: [
+            {
+              insertText: {
+                location: { index: insertIndex },
+                text: textMarker,
+              },
+            },
+          ],
+        },
+      });
+
+      const imageInsertIndex = insertIndex + textMarkerLength;
+
+      // Thử từng format URL
+      for (const format of urlFormats) {
+        try {
+          const imageInsertResponse = await docs.documents.batchUpdate({
+            documentId: documentId,
+            requestBody: {
+              requests: [
+                {
+                  insertInlineImage: {
+                    location: { index: imageInsertIndex },
+                    uri: format.uri,
+                    objectSize: {
+                      height: {
+                        magnitude: 933,
+                        unit: 'PT',
+                      },
+                      width: {
+                        magnitude: 462,
+                        unit: 'PT',
+                      },
+                    },
+                  },
+                },
+              ],
+            },
+          });
+
+          const insertResponse =
+            imageInsertResponse.data.replies?.[0]?.insertInlineImage;
+          if (insertResponse?.objectId) {
+            // Chèn text sau image
+            await docs.documents.batchUpdate({
+              documentId: documentId,
+              requestBody: {
+                requests: [
+                  {
+                    insertText: {
+                      location: { index: imageInsertIndex + 1 },
+                      text: textAfter,
+                    },
+                  },
+                ],
+              },
+            });
+
+            console.log('✅ Chart inserted successfully before footer');
+
+            return {
+              success: true,
+              objectId: insertResponse.objectId,
+              format: format.name,
+              message: 'Image inserted successfully',
+            };
+          }
+        } catch (formatError: any) {
+          console.warn(`Format ${format.name} failed:`, formatError.message);
+          continue;
+        }
+      }
+
+      throw new Error('All URL formats failed to insert image');
+    } catch (error: any) {
+      console.error('Failed to insert image to Google Docs:', error.message);
+      throw error;
+    }
   }
 
   /**
@@ -1613,11 +2230,11 @@ ${csv}`;
       const bufferContent =
         typeof fileData.content === 'string'
           ? Buffer.from(
-              fileData.content.startsWith('data:')
-                ? fileData.content.split(',')[1]
-                : fileData.content,
-              'base64',
-            )
+            fileData.content.startsWith('data:')
+              ? fileData.content.split(',')[1]
+              : fileData.content,
+            'base64',
+          )
           : fileData.content;
 
       const fileMetadata: any = {
@@ -1628,9 +2245,12 @@ ${csv}`;
         fileMetadata.parents = [fileData.folderId];
       }
 
+      // Convert Buffer to stream for Google Drive API
+      const stream = Readable.from(bufferContent);
+
       const media = {
         mimeType: fileData.mimeType || 'image/png',
-        body: bufferContent,
+        body: stream,
       };
 
       const file = await drive.files.create({
@@ -1641,11 +2261,11 @@ ${csv}`;
 
       return {
         fileId: file.data.id,
-        fileName: file.data.name,
+        fileName: file.data.name || fileData.name,
         mimeType: fileData.mimeType || 'image/png',
-        folderId: fileData.folderId,
-        webViewLink: file.data.webViewLink,
-        webContentLink: file.data.webContentLink,
+        folderId: fileData.folderId || null,
+        webViewLink: file.data.webViewLink || `https://drive.google.com/file/d/${file.data.id}/view`,
+        webContentLink: file.data.webContentLink || `https://drive.google.com/uc?id=${file.data.id}&export=download`,
         uploadedAt: new Date().toISOString(),
       };
     } catch (error: any) {
@@ -1706,6 +2326,8 @@ ${csv}`;
       editUrl: `https://drive.google.com/file/d/${fileId}/edit`,
       downloadUrl: `https://drive.google.com/uc?export=download&id=${fileId}`,
       shareUrl: `https://drive.google.com/file/d/${fileId}/view?usp=sharing`,
+      // Image URL để insert vào Google Docs (theo n8n format)
+      imageUrl: `https://drive.google.com/uc?export=view&id=${fileId}`,
     };
   }
 
@@ -2097,34 +2719,84 @@ ${csv}`;
     let urlResult: any = null;
 
     if (chartImage || quickChartUrl) {
+      let fileContent: Buffer | string | null = null;
+
       // Nếu có chartImage, upload trực tiếp
-      // Nếu không, có thể download từ quickChartUrl rồi upload
-      const fileContent = chartImage
-        ? chartImage.startsWith('data:') || chartImage.startsWith('http')
-          ? chartImage
-          : Buffer.from(chartImage, 'base64')
-        : null;
+      if (chartImage) {
+        if (chartImage.startsWith('data:')) {
+          // Data URL - extract base64 part
+          const base64Data = chartImage.split(',')[1];
+          fileContent = Buffer.from(base64Data, 'base64');
+        } else if (chartImage.startsWith('http')) {
+          // HTTP URL - download first
+          try {
+            const response = await axios.get(chartImage, {
+              responseType: 'arraybuffer',
+            });
+            fileContent = Buffer.from(response.data, 'binary');
+          } catch (error: any) {
+            console.warn('Failed to download chart image from URL:', error.message);
+          }
+        } else {
+          // Base64 string
+          fileContent = Buffer.from(chartImage, 'base64');
+        }
+      } else if (quickChartUrl) {
+        // Download từ quickChartUrl và upload
+        try {
+          console.log('Downloading chart from QuickChart URL...');
+          const response = await axios.get(quickChartUrl, {
+            responseType: 'arraybuffer',
+            timeout: 30000, // 30 seconds timeout
+          });
+          fileContent = Buffer.from(response.data, 'binary');
+          console.log('Chart downloaded successfully, size:', fileContent.length, 'bytes');
+        } catch (error: any) {
+          console.warn('Failed to download chart from QuickChart URL:', error.message);
+        }
+      }
 
       if (fileContent) {
         // Nếu không truyền folderId, đọc từ .env
         const finalFolderId =
           folderId || this.configService.get<string>('GOOGLE_DRIVE_FOLDER_ID');
 
-        uploadResult = await this.uploadFileToGoogleDrive({
-          name: `KPI_Chart_${new Date().toISOString().split('T')[0]}.png`,
-          content: fileContent,
-          mimeType: 'image/png',
-          folderId: finalFolderId,
-        });
+        try {
+          uploadResult = await this.uploadFileToGoogleDrive({
+            name: `KPI_Chart_${new Date().toISOString().split('T')[0]}.png`,
+            content: fileContent,
+            mimeType: 'image/png',
+            folderId: finalFolderId,
+          });
 
-        const fileId = uploadResult?.fileId;
-        if (fileId) {
-          // Share file
-          shareResult = await this.shareFileOnGoogleDrive(fileId, shareOptions);
+          const fileId = uploadResult?.fileId;
+          if (fileId) {
+            // Share file - tự động share với default options nếu không có shareOptions
+            const finalShareOptions = shareOptions && (shareOptions.role || shareOptions.type)
+              ? shareOptions
+              : {
+                role: 'reader' as const,
+                type: 'anyone' as const,
+              };
 
-          // Build URL
-          urlResult = await this.buildGoogleDriveUrl(fileId);
-          quickChartUrl = urlResult?.shareUrl || quickChartUrl;
+            try {
+              shareResult = await this.shareFileOnGoogleDrive(fileId, finalShareOptions);
+            } catch (shareError: any) {
+              console.warn('Failed to share file:', shareError.message);
+            }
+
+            // Build URL - dùng imageUrl thay vì shareUrl để insert vào Google Docs
+            try {
+              urlResult = await this.buildGoogleDriveUrl(fileId);
+              // Dùng imageUrl (format cho Google Docs API) thay vì shareUrl (view URL)
+              quickChartUrl = urlResult?.imageUrl || urlResult?.shareUrl || quickChartUrl;
+              console.log('✅ Using imageUrl for chart insertion:', urlResult?.imageUrl);
+            } catch (urlError: any) {
+              console.warn('Failed to build Google Drive URL:', urlError.message);
+            }
+          }
+        } catch (uploadError: any) {
+          console.error('Failed to upload chart to Google Drive:', uploadError.message);
         }
       }
     }
@@ -2183,7 +2855,7 @@ ${csv}`;
   ) {
     // Format message từ kết quả 2 nhánh
     const timestamp = new Date().toLocaleString('vi-VN');
-    
+
     // Format cho Slack (Markdown)
     let slackMessage = '📊 *Báo cáo Tổng hợp*\n\n';
 
