@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Body, Query } from '@nestjs/common';
+import { Controller, Get, Post, Body, Query, Param } from '@nestjs/common';
 import { WorkflowService } from './workflow.service';
 import { Public } from '../auth/public.decorator';
 
@@ -375,5 +375,182 @@ export class WorkflowController {
       body.chartUrl,
       body.insertAfterIndex,
     );
+  }
+
+  /**
+   * API để lấy danh sách tasks quá hạn và thống kê
+   * Trả về tasks đã được enrich với isOverdue field
+   */
+  @Public()
+  @Get('overdue-tasks')
+  async getOverdueTasks() {
+    return this.workflowService.getOverdueTasks();
+  }
+
+  /**
+   * API để lấy tasks quá hạn được nhóm theo member
+   * Trả về summary và tasks được nhóm theo từng thành viên
+   */
+  @Public()
+  @Get('overdue-tasks-by-member')
+  async getOverdueTasksByMember() {
+    return this.workflowService.getOverdueTasksByMember();
+  }
+
+  /**
+   * API để gửi thông báo nhắc trễ đến từng thành viên qua Gmail
+   * Mỗi thành viên sẽ nhận được email riêng với danh sách task quá hạn của họ
+   */
+  @Public()
+  @Post('send-overdue-notifications')
+  async sendOverdueNotifications(
+    @Body()
+    body: {
+      emailTo?: string | string[]; // Email người nhận (optional, sẽ dùng email từ member nếu không có)
+      options?: {
+        sendToAllMembers?: boolean; // Gửi cho tất cả members (kể cả không có task quá hạn)
+        includeSummary?: boolean; // Bao gồm summary tổng hợp
+        emailSubject?: string; // Subject của email
+      };
+    },
+  ) {
+    return this.workflowService.sendOverdueNotificationsToMembers(body.emailTo, body.options);
+  }
+
+  /**
+   * API TỔNG HỢP: Tự động thực hiện tất cả các bước từ đầu đến cuối
+   * 
+   * Quy trình tự động:
+   * 1. Query TẤT CẢ tasks từ DB
+   * 2. Tính toán các trạng thái cho từng task (quá hạn, sắp hết hạn, risky, blocked...)
+   * 3. Nhóm tasks theo member
+   * 4. Query lại User từ DB để lấy email
+   * 5. Format thông báo cụ thể cho từng member
+   * 6. Gửi email với thông tin chi tiết
+   * 
+   * Tái sử dụng các API/method có sẵn:
+   * - getOverdueTasks() - Query tasks và tính toán
+   * - getOverdueTasksByMember() - Nhóm theo member
+   * - sendOverdueNotificationsToMembers() - Gửi email
+   */
+  @Public()
+  @Post('process-and-send-overdue-notifications')
+  async processAndSendOverdueNotifications(
+    @Body()
+    body?: {
+      options?: {
+        sendToAllMembers?: boolean; // Gửi cho tất cả members (kể cả không có task quá hạn)
+        includeSummary?: boolean; // Bao gồm summary tổng hợp
+        emailSubject?: string; // Subject của email
+      };
+    },
+  ) {
+    return this.workflowService.processAndSendOverdueNotifications(body?.options);
+  }
+
+  /**
+   * API lấy thông tin trạng thái từ Jira
+   * 
+   * Có thể:
+   * 1. Lấy thông tin một issue cụ thể (qua issueKey)
+   * 2. Tìm kiếm issues bằng JQL query
+   * 3. Lấy tất cả issues được assign cho user hiện tại (nếu không có issueKey và JQL)
+   */
+  @Public()
+  @Post('jira-status')
+  async getJiraStatus(
+    @Body()
+    body?: {
+      issueKey?: string; // Jira issue key (VD: PROJ-123) - để lấy 1 issue cụ thể
+      jql?: string; // JQL query để tìm kiếm nhiều issues (VD: "project = PROJ AND status = 'In Progress'")
+      jiraUrl?: string; // Optional - sẽ dùng từ .env nếu không có
+      jiraEmail?: string; // Optional - sẽ dùng từ .env nếu không có
+      jiraApiToken?: string; // Optional - sẽ dùng từ .env nếu không có
+      jiraUsername?: string; // Optional - alternative auth
+      jiraPassword?: string; // Optional - alternative auth
+    },
+  ) {
+    try {
+      return await this.workflowService.getJiraStatus(body || {});
+    } catch (error: any) {
+      console.error('❌ Lỗi trong getJiraStatus:', error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * API lấy thông tin một issue cụ thể từ Jira
+   */
+  @Public()
+  @Get('jira-status/:issueKey')
+  async getJiraIssueStatus(
+    @Param('issueKey') issueKey: string,
+    @Body()
+    body?: {
+      jiraUrl?: string;
+      jiraEmail?: string;
+      jiraApiToken?: string;
+      jiraUsername?: string;
+      jiraPassword?: string;
+    },
+  ) {
+    return this.workflowService.getJiraIssueStatus(issueKey, body);
+  }
+
+  /**
+   * API đồng bộ thông tin từ Jira vào database
+   * Cập nhật tasks trong DB dựa trên thông tin từ Jira
+   */
+  @Public()
+  @Post('jira-sync')
+  async syncJiraToDatabase(
+    @Body()
+    body?: {
+      issueKey?: string; // Sync một issue cụ thể
+      jql?: string; // Sync nhiều issues theo JQL
+      updateAll?: boolean; // Sync tất cả tasks có jiraIssueId trong DB
+      jiraUrl?: string;
+      jiraEmail?: string;
+      jiraApiToken?: string;
+      jiraUsername?: string;
+      jiraPassword?: string;
+    },
+  ) {
+    return this.workflowService.syncJiraToDatabase(body);
+  }
+
+  /**
+   * API TỔNG HỢP: Lấy status từ Project → Task, kiểm tra thay đổi ở Jira và cập nhật DB
+   * Tự động sync tất cả projects và tasks có jiraIssueId
+   * Chỉ cập nhật những gì có thay đổi
+   */
+  @Public()
+  @Post('jira-sync-all')
+  async syncAllJiraChanges(
+    @Body()
+    body?: {
+      jiraUrl?: string;
+      jiraEmail?: string;
+      jiraApiToken?: string;
+      jiraUsername?: string;
+      jiraPassword?: string;
+      projectKey?: string; // Project key để sync (VD: PROJ)
+      issueKeys?: string[]; // Danh sách issueKeys cụ thể để sync (VD: ["PROJ-1", "PROJ-2"])
+    },
+  ) {
+    return this.workflowService.syncAllJiraChanges(body);
+  }
+
+  /**
+   * API helper: Lấy danh sách tất cả issueKeys từ Jira
+   * Giúp bạn biết có những issueKeys nào trong Jira để sử dụng
+   */
+  @Public()
+  @Get('jira-list-issues')
+  async listJiraIssues(
+    @Query('project') project?: string,
+    @Query('maxResults') maxResults?: string,
+  ) {
+    return this.workflowService.listAllJiraIssues(project, maxResults ? parseInt(maxResults) : 50);
   }
 }

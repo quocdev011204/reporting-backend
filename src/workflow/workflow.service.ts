@@ -9,6 +9,7 @@ import { google } from 'googleapis';
 import { Readable } from 'stream';
 import * as nodemailer from 'nodemailer';
 import { IncomingWebhook } from '@slack/webhook';
+import * as crypto from 'crypto';
 
 @Injectable()
 export class WorkflowService {
@@ -3117,6 +3118,771 @@ Generated at: ${timestamp}
     };
   }
 
+  /**
+   * Parse deadline an toàn (tránh lỗi định dạng)
+   * Hỗ trợ định dạng yyyy-dd-mm → đảo lại thành yyyy-mm-dd
+   */
+  private parseDeadline(deadlineStr: string | null | undefined): Date | null {
+    if (!deadlineStr || deadlineStr === 'null' || deadlineStr.trim() === '') {
+      return null;
+    }
+
+    // Nếu định dạng yyyy-dd-mm → đảo lại
+    const parts = deadlineStr.split('-');
+    if (parts.length === 3 && parseInt(parts[1], 10) > 12) {
+      deadlineStr = `${parts[0]}-${parts[2]}-${parts[1]}`;
+    }
+
+    const date = new Date(deadlineStr);
+    return isNaN(date.getTime()) ? null : date;
+  }
+
+  /**
+   * Lấy TẤT CẢ dữ liệu từ database và tính toán các trạng thái
+   * - Lấy tất cả tasks từ DB với đầy đủ thông tin project và assignedTo
+   * - Tính toán: quá hạn, sắp hết hạn, blocked, risky, etc.
+   * - Trả về tasks đã được enrich với các trạng thái
+   */
+  async getOverdueTasks() {
+    const currentDate = new Date();
+    const today = this.stripTime(new Date(currentDate));
+
+    // LẤY TẤT CẢ TASKS TỪ DATABASE với đầy đủ thông tin
+    const tasks = await this.prisma.task.findMany({
+      include: {
+        project: {
+          select: {
+            id: true,
+            name: true,
+            endDate: true,
+            status: true,
+          },
+        },
+        assignedTo: {
+          select: {
+            id: true,
+            username: true,
+            name: true,
+            email: true,
+            slackUserId: true,
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    // TÍNH TOÁN các trạng thái cho từng task
+    const enrichedTasks = tasks.map((task) => {
+      // Lấy dữ liệu từ DB
+      const data: any = {
+        task_id: task.id,
+        title: task.title,
+        description: task.description || '',
+        status: task.status || '',
+        priority: task.priority || '',
+        assigned_member_id: task.assignedToId,
+        assigned_member_name: task.assignedTo?.name || task.assignedTo?.username || 'Chưa gán',
+        assigned_member_email: task.assignedTo?.email || null,
+        assigned_member_slack: task.assignedTo?.slackUserId || null,
+        project_id: task.project?.id || null,
+        project_name: task.project?.name || '',
+        project_status: task.project?.status || '',
+        created_date: task.createdAt.toISOString(),
+        updated_date: task.updatedAt.toISOString(),
+        deadline_task: task.project?.endDate
+          ? task.project.endDate.toISOString().split('T')[0]
+          : null,
+        estimated_hours: task.estimatedTime || 0,
+        actual_time: task.actualTime || 0,
+      };
+
+      // Parse ngày từ DB
+      data.createdDateObj = data.created_date ? new Date(data.created_date) : null;
+      data.updatedDateObj = data.updated_date ? new Date(data.updated_date) : null;
+      data.dueDateObj = this.parseDeadline(data.deadline_task);
+      data.actualEndObj = null; // chưa có ngày kết thúc thực tế trong DB
+
+      // Chuẩn hóa status từ DB
+      const status = (data.status || '').trim().toLowerCase();
+      const normalizedStatus =
+        status.includes('done') || status.includes('completed')
+          ? 'completed'
+          : status.includes('in progress') || status.includes('in_progress')
+            ? 'in_progress'
+            : status.includes('assigned')
+              ? 'assigned'
+              : status.includes('blocked')
+                ? 'blocked'
+                : status || 'unknown';
+
+      data.normalizedStatus = normalizedStatus;
+
+      // TÍNH TOÁN: Kiểm tra quá hạn
+      let isOverdue = false;
+      let daysOverdue = 0;
+      if (data.dueDateObj && normalizedStatus !== 'completed') {
+        const dueDate = this.stripTime(new Date(data.dueDateObj));
+        const daysDiff = Math.ceil((today.getTime() - dueDate.getTime()) / (1000 * 60 * 60 * 24));
+        if (daysDiff > 0) {
+          isOverdue = true;
+          daysOverdue = daysDiff;
+        }
+      }
+      data.isOverdue = isOverdue;
+      data.daysOverdue = daysOverdue;
+
+      // TÍNH TOÁN: Cần làm hôm nay (deadline là hôm nay)
+      let isDueToday = false;
+      if (data.dueDateObj && !isOverdue && normalizedStatus !== 'completed') {
+        const dueDate = this.stripTime(new Date(data.dueDateObj));
+        const daysDiff = Math.ceil((dueDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+        if (daysDiff === 0) {
+          isDueToday = true;
+        }
+      }
+      data.isDueToday = isDueToday;
+
+      // TÍNH TOÁN: Sắp hết hạn (trong 1-2 ngày tới, nhưng không phải hôm nay)
+      let isDueSoon = false;
+      let daysUntilDue = null;
+      if (data.dueDateObj && !isOverdue && !isDueToday && normalizedStatus !== 'completed') {
+        const dueDate = this.stripTime(new Date(data.dueDateObj));
+        const daysDiff = Math.ceil((dueDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+        daysUntilDue = daysDiff;
+        if (daysDiff > 0 && daysDiff <= 2) {
+          isDueSoon = true;
+        }
+      }
+      data.isDueSoon = isDueSoon;
+      data.daysUntilDue = daysUntilDue;
+
+      // TÍNH TOÁN: Blocked status
+      const isBlocked = normalizedStatus === 'blocked' || /blocked|bị chặn/.test(status);
+      data.isBlocked = isBlocked;
+
+      // TÍNH TOÁN: Risky (high priority + quá hạn, hôm nay, hoặc sắp hết hạn)
+      const priority = (data.priority || '').toLowerCase();
+      const isHighPriority = priority.includes('high');
+      const isRisky = isHighPriority && (isOverdue || isDueToday || isDueSoon);
+      data.isRisky = isRisky;
+
+      // TÍNH TOÁN: Execution time (số ngày thực hiện)
+      data.executionTime =
+        data.actualEndObj && data.createdDateObj
+          ? (data.actualEndObj.getTime() - data.createdDateObj.getTime()) / (1000 * 60 * 60 * 24)
+          : null;
+
+      // TÍNH TOÁN: Số ngày đã làm việc (từ createdDate đến hiện tại)
+      if (data.createdDateObj) {
+        const createdDate = this.stripTime(new Date(data.createdDateObj));
+        const daysWorking = Math.ceil((today.getTime() - createdDate.getTime()) / (1000 * 60 * 60 * 24));
+        data.daysWorking = daysWorking;
+      } else {
+        data.daysWorking = 0;
+      }
+
+      return data;
+    });
+
+    return enrichedTasks;
+  }
+
+  /**
+   * Tính toán thống kê và nhóm tasks theo member
+   * TẤT CẢ dữ liệu lấy từ database, sau đó tính toán các trạng thái
+   */
+  async getOverdueTasksByMember() {
+    // Lấy TẤT CẢ tasks từ database và tính toán
+    const tasks = await this.getOverdueTasks();
+
+    // TÍNH TOÁN: Lọc các task theo điều kiện từ database
+    const overdueTasks = tasks.filter((t) => t.isOverdue === true);
+    const dueTodayTasks = tasks.filter((t) => t.isDueToday === true);
+    const completedTasks = tasks.filter((t) => t.normalizedStatus === 'completed');
+    const riskyTasks = tasks.filter((t) => t.isRisky === true);
+    const blockedTasks = tasks.filter((t) => t.isBlocked === true);
+    const dueSoonTasks = tasks.filter((t) => t.isDueSoon === true);
+
+    // TÍNH TOÁN: Thống kê tổng hợp
+    const summary = {
+      totalTasks: tasks.length,
+      totalOverdue: overdueTasks.length,
+      totalDueToday: dueTodayTasks.length,
+      totalCompleted: completedTasks.length,
+      totalRisky: riskyTasks.length,
+      totalBlocked: blockedTasks.length,
+      totalDueSoon: dueSoonTasks.length,
+      percentCompleted:
+        tasks.length > 0
+          ? ((completedTasks.length / tasks.length) * 100).toFixed(1) + '%'
+          : '0%',
+      percentOverdue:
+        tasks.length > 0 ? ((overdueTasks.length / tasks.length) * 100).toFixed(1) + '%' : '0%',
+      percentDueToday:
+        tasks.length > 0 ? ((dueTodayTasks.length / tasks.length) * 100).toFixed(1) + '%' : '0%',
+      percentRisky:
+        tasks.length > 0 ? ((riskyTasks.length / tasks.length) * 100).toFixed(1) + '%' : '0%',
+    };
+
+    // TÍNH TOÁN: Nhóm tasks theo member (chỉ lấy các task cần thông báo)
+    // Bao gồm: overdue, due today (hôm nay), risky, due soon, blocked
+    const tasksToNotify = tasks.filter(
+      (t) => t.isOverdue || t.isDueToday || t.isRisky || t.isDueSoon || t.isBlocked,
+    );
+
+    const tasksByMember: Record<
+      string,
+      {
+        memberId: number | null;
+        memberName: string;
+        memberEmail: string | null;
+        memberSlackId: string | null;
+        tasks: any[];
+          stats: {
+            overdue: number;
+            dueToday: number;
+            risky: number;
+            blocked: number;
+            dueSoon: number;
+          };
+      }
+    > = {};
+
+    tasksToNotify.forEach((task) => {
+      // Sử dụng memberId làm key để tránh trùng lặp khi có nhiều member cùng tên
+      const memberKey = task.assigned_member_id
+        ? `member_${task.assigned_member_id}`
+        : 'unassigned';
+
+      if (!tasksByMember[memberKey]) {
+        tasksByMember[memberKey] = {
+          memberId: task.assigned_member_id,
+          memberName: task.assigned_member_name,
+          memberEmail: task.assigned_member_email,
+          memberSlackId: task.assigned_member_slack,
+          tasks: [],
+          stats: {
+            overdue: 0,
+            dueToday: 0,
+            risky: 0,
+            blocked: 0,
+            dueSoon: 0,
+          },
+        };
+      }
+
+      tasksByMember[memberKey].tasks.push(task);
+
+      // Cập nhật stats cho member này
+      if (task.isOverdue) tasksByMember[memberKey].stats.overdue++;
+      if (task.isDueToday) tasksByMember[memberKey].stats.dueToday++;
+      if (task.isRisky) tasksByMember[memberKey].stats.risky++;
+      if (task.isBlocked) tasksByMember[memberKey].stats.blocked++;
+      if (task.isDueSoon) tasksByMember[memberKey].stats.dueSoon++;
+    });
+
+    return {
+      summary,
+      overdueTasks,
+      dueTodayTasks,
+      completedTasks,
+      riskyTasks,
+      blockedTasks,
+      dueSoonTasks,
+      tasksByMember: Object.values(tasksByMember),
+    };
+  }
+
+  /**
+   * Format email HTML cho từng member với danh sách task quá hạn của họ
+   * Hiển thị thông tin CỤ THỂ từ database và các tính toán đã thực hiện
+   */
+  private formatOverdueEmailForMember(memberName: string, tasks: any[]): string {
+    const today = new Date();
+    const formattedDate = `${today.getDate().toString().padStart(2, '0')}/${(today.getMonth() + 1).toString().padStart(2, '0')}/${today.getFullYear()}`;
+
+    // Tính toán thống kê cho member này
+    const totalOverdue = tasks.filter((t) => t.isOverdue).length;
+    const totalDueToday = tasks.filter((t) => t.isDueToday).length;
+    const totalRisky = tasks.filter((t) => t.isRisky).length;
+    const totalBlocked = tasks.filter((t) => t.isBlocked).length;
+    const totalDueSoon = tasks.filter((t) => t.isDueSoon).length;
+
+    let html = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="UTF-8">
+      <style>
+        body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+        .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+        .header { background-color: #ff4444; color: white; padding: 20px; border-radius: 5px 5px 0 0; }
+        .content { background-color: #f9f9f9; padding: 20px; border: 1px solid #ddd; }
+        .summary-box { background-color: #fff3cd; padding: 15px; margin: 15px 0; border-left: 4px solid #ffc107; border-radius: 4px; }
+        .task-item { background-color: white; padding: 15px; margin: 10px 0; border-left: 4px solid #ff4444; border-radius: 4px; }
+        .task-item.risky { border-left-color: #ff8800; background-color: #fff8f0; }
+        .task-item.blocked { border-left-color: #6c757d; background-color: #f8f9fa; }
+        .task-item.due-today { border-left-color: #ff6b35; background-color: #fff5f0; }
+        .task-title { font-weight: bold; font-size: 16px; color: #333; margin-bottom: 8px; }
+        .task-detail { margin: 5px 0; color: #666; }
+        .footer { background-color: #f0f0f0; padding: 15px; text-align: center; border-radius: 0 0 5px 5px; font-size: 12px; color: #666; }
+        .badge { display: inline-block; padding: 3px 8px; border-radius: 3px; font-size: 12px; font-weight: bold; margin-left: 5px; }
+        .badge-overdue { background-color: #ff4444; color: white; }
+        .badge-due-today { background-color: #ff6b35; color: white; }
+        .badge-risky { background-color: #ff8800; color: white; }
+        .badge-blocked { background-color: #6c757d; color: white; }
+        .badge-due-soon { background-color: #ffc107; color: #333; }
+        .badge-high { background-color: #ff8800; color: white; }
+        .badge-medium { background-color: #ffbb00; color: white; }
+        .badge-low { background-color: #88cc00; color: white; }
+        .status-badge { display: inline-block; padding: 2px 6px; border-radius: 3px; font-size: 11px; }
+        .status-completed { background-color: #28a745; color: white; }
+        .status-in-progress { background-color: #007bff; color: white; }
+        .status-assigned { background-color: #17a2b8; color: white; }
+        .status-blocked { background-color: #6c757d; color: white; }
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <div class="header">
+          <h2>🚨 Thông báo nhắc trễ — ${formattedDate}</h2>
+        </div>
+        <div class="content">
+          <p>Xin chào <strong>${memberName}</strong>,</p>
+          <p>Bạn có <strong>${tasks.length}</strong> task cần chú ý:</p>
+          
+          <div class="summary-box">
+            <strong>📊 Tóm tắt:</strong><br>
+            • Quá hạn: <strong>${totalOverdue}</strong> task<br>
+            • Cần làm hôm nay: <strong>${totalDueToday}</strong> task<br>
+            • Sắp hết hạn (1-2 ngày): <strong>${totalDueSoon}</strong> task<br>
+            • Nguy cơ cao (High priority + quá hạn/hôm nay/sắp hết hạn): <strong>${totalRisky}</strong> task<br>
+            • Đang bị chặn: <strong>${totalBlocked}</strong> task
+          </div>
+          
+          <p><strong>Chi tiết các task:</strong></p>
+    `;
+
+    // Sắp xếp tasks: risky và overdue trước, sau đó đến due today, rồi due soon
+    const sortedTasks = [...tasks].sort((a, b) => {
+      if (a.isRisky && !b.isRisky) return -1;
+      if (!a.isRisky && b.isRisky) return 1;
+      if (a.isOverdue && !b.isOverdue) return -1;
+      if (!a.isOverdue && b.isOverdue) return 1;
+      if (a.isDueToday && !b.isDueToday) return -1;
+      if (!a.isDueToday && b.isDueToday) return 1;
+      if (a.isDueSoon && !b.isDueSoon) return -1;
+      if (!a.isDueSoon && b.isDueSoon) return 1;
+      return 0;
+    });
+
+    sortedTasks.forEach((task, index) => {
+      const deadlineStr = task.deadline_task
+        ? new Date(task.deadline_task).toLocaleDateString('vi-VN')
+        : 'Không có deadline';
+
+      // Tính toán số ngày quá hạn hoặc còn lại
+      let deadlineInfo = '';
+      if (task.isOverdue && task.daysOverdue > 0) {
+        deadlineInfo = `<span class="badge badge-overdue">Quá hạn ${task.daysOverdue} ngày</span>`;
+      } else if (task.isDueToday) {
+        deadlineInfo = `<span class="badge badge-due-today">⏰ CẦN LÀM HÔM NAY</span>`;
+      } else if (task.isDueSoon && task.daysUntilDue !== null) {
+        deadlineInfo = `<span class="badge badge-due-soon">Còn ${task.daysUntilDue} ngày</span>`;
+      }
+
+      const priorityClass =
+        task.priority?.toLowerCase() === 'high'
+          ? 'badge-high'
+          : task.priority?.toLowerCase() === 'medium'
+            ? 'badge-medium'
+            : task.priority?.toLowerCase() === 'low'
+              ? 'badge-low'
+              : '';
+
+      const statusClass =
+        task.normalizedStatus === 'completed'
+          ? 'status-completed'
+          : task.normalizedStatus === 'in_progress'
+            ? 'status-in-progress'
+            : task.normalizedStatus === 'assigned'
+              ? 'status-assigned'
+              : task.normalizedStatus === 'blocked'
+                ? 'status-blocked'
+                : '';
+
+      const taskItemClass = task.isRisky ? 'risky' : task.isBlocked ? 'blocked' : task.isDueToday ? 'due-today' : '';
+
+      html += `
+          <div class="task-item ${taskItemClass}">
+            <div class="task-title">
+              ${index + 1}. ${task.title || `Task #${task.task_id}`}
+              ${task.isRisky ? '<span class="badge badge-risky">⚠️ NGUY CƠ CAO</span>' : ''}
+              ${task.isDueToday ? '<span class="badge badge-due-today">⏰ HÔM NAY</span>' : ''}
+              ${task.isBlocked ? '<span class="badge badge-blocked">🚫 BỊ CHẶN</span>' : ''}
+            </div>
+            <div class="task-detail">📝 <strong>Mô tả:</strong> ${task.description || 'Không có mô tả'}</div>
+            <div class="task-detail">📅 <strong>Deadline:</strong> ${deadlineStr} ${deadlineInfo}</div>
+            <div class="task-detail">🎯 <strong>Dự án:</strong> ${task.project_name || 'N/A'}</div>
+            <div class="task-detail">⚡ <strong>Độ ưu tiên:</strong> ${task.priority ? `<span class="badge ${priorityClass}">${task.priority}</span>` : 'N/A'}</div>
+            <div class="task-detail">📊 <strong>Trạng thái:</strong> <span class="status-badge ${statusClass}">${task.status || 'N/A'}</span></div>
+            <div class="task-detail">⏱️ <strong>Đã làm việc:</strong> ${task.daysWorking || 0} ngày</div>
+            ${task.estimated_hours > 0 ? `<div class="task-detail">⏳ <strong>Ước tính:</strong> ${task.estimated_hours} giờ</div>` : ''}
+          </div>
+      `;
+    });
+
+    html += `
+          <p style="margin-top: 20px;">
+            <strong>⚠️ Vui lòng cập nhật tiến độ hoặc hoàn thành các task này sớm nhất có thể.</strong>
+          </p>
+          <p>📊 Nếu cần hỗ trợ, vui lòng liên hệ với team leader.</p>
+        </div>
+        <div class="footer">
+          <p>Email này được gửi tự động từ hệ thống quản lý dự án</p>
+        </div>
+      </div>
+    </body>
+    </html>
+    `;
+
+    return html;
+  }
+
+  /**
+   * Format email text (plain text) cho từng member với danh sách task quá hạn của họ
+   * Hiển thị thông tin CỤ THỂ từ database và các tính toán đã thực hiện
+   */
+  private formatOverdueTextForMember(memberName: string, tasks: any[]): string {
+    const today = new Date();
+    const formattedDate = `${today.getDate().toString().padStart(2, '0')}/${(today.getMonth() + 1).toString().padStart(2, '0')}/${today.getFullYear()}`;
+
+    // Tính toán thống kê cho member này
+    const totalOverdue = tasks.filter((t) => t.isOverdue).length;
+    const totalDueToday = tasks.filter((t) => t.isDueToday).length;
+    const totalRisky = tasks.filter((t) => t.isRisky).length;
+    const totalBlocked = tasks.filter((t) => t.isBlocked).length;
+    const totalDueSoon = tasks.filter((t) => t.isDueSoon).length;
+
+    let text = `🚨 Thông báo nhắc trễ — ${formattedDate}\n\n`;
+    text += `Xin chào ${memberName},\n\n`;
+    text += `Bạn có ${tasks.length} task cần chú ý:\n\n`;
+
+    text += `📊 TÓM TẮT:\n`;
+    text += `• Quá hạn: ${totalOverdue} task\n`;
+    text += `• Cần làm hôm nay: ${totalDueToday} task\n`;
+    text += `• Sắp hết hạn (1-2 ngày): ${totalDueSoon} task\n`;
+    text += `• Nguy cơ cao (High priority + quá hạn/hôm nay/sắp hết hạn): ${totalRisky} task\n`;
+    text += `• Đang bị chặn: ${totalBlocked} task\n\n`;
+
+    text += `CHI TIẾT CÁC TASK:\n\n`;
+
+    // Sắp xếp tasks: risky và overdue trước, sau đó due today, rồi due soon
+    const sortedTasks = [...tasks].sort((a, b) => {
+      if (a.isRisky && !b.isRisky) return -1;
+      if (!a.isRisky && b.isRisky) return 1;
+      if (a.isOverdue && !b.isOverdue) return -1;
+      if (!a.isOverdue && b.isOverdue) return 1;
+      if (a.isDueToday && !b.isDueToday) return -1;
+      if (!a.isDueToday && b.isDueToday) return 1;
+      if (a.isDueSoon && !b.isDueSoon) return -1;
+      if (!a.isDueSoon && b.isDueSoon) return 1;
+      return 0;
+    });
+
+    sortedTasks.forEach((task, index) => {
+      const deadlineStr = task.deadline_task
+        ? new Date(task.deadline_task).toLocaleDateString('vi-VN')
+        : 'Không có deadline';
+
+      let deadlineInfo = '';
+      if (task.isOverdue && task.daysOverdue > 0) {
+        deadlineInfo = `(Quá hạn ${task.daysOverdue} ngày)`;
+      } else if (task.isDueToday) {
+        deadlineInfo = `(⏰ CẦN LÀM HÔM NAY)`;
+      } else if (task.isDueSoon && task.daysUntilDue !== null) {
+        deadlineInfo = `(Còn ${task.daysUntilDue} ngày)`;
+      }
+
+      text += `${index + 1}. ${task.title || `Task #${task.task_id}`}`;
+      if (task.isRisky) text += ` ⚠️ NGUY CƠ CAO`;
+      if (task.isDueToday) text += ` ⏰ HÔM NAY`;
+      if (task.isBlocked) text += ` 🚫 BỊ CHẶN`;
+      text += `\n`;
+      text += `   📝 Mô tả: ${task.description || 'Không có mô tả'}\n`;
+      text += `   📅 Deadline: ${deadlineStr} ${deadlineInfo}\n`;
+      text += `   🎯 Dự án: ${task.project_name || 'N/A'}\n`;
+      text += `   ⚡ Độ ưu tiên: ${task.priority || 'N/A'}\n`;
+      text += `   📊 Trạng thái: ${task.status || 'N/A'}\n`;
+      text += `   ⏱️ Đã làm việc: ${task.daysWorking || 0} ngày\n`;
+      if (task.estimated_hours > 0) {
+        text += `   ⏳ Ước tính: ${task.estimated_hours} giờ\n`;
+      }
+      text += `\n`;
+    });
+
+    text += `\n⚠️ Vui lòng cập nhật tiến độ hoặc hoàn thành các task này sớm nhất có thể.\n`;
+    text += `\n📊 Nếu cần hỗ trợ, vui lòng liên hệ với team leader.\n`;
+
+    return text;
+  }
+
+  /**
+   * API TỔNG HỢP: Tự động thực hiện tất cả các bước từ đầu đến cuối
+   * 1. Query TẤT CẢ tasks từ DB
+   * 2. Tính toán các trạng thái cho từng task
+   * 3. Nhóm tasks theo member
+   * 4. Query lại User từ DB để lấy email
+   * 5. Format thông báo cụ thể cho từng member
+   * 6. Gửi email với thông tin chi tiết
+   * 
+   * Tái sử dụng các method có sẵn: getOverdueTasks(), getOverdueTasksByMember(), sendOverdueNotificationsToMembers()
+   */
+  async processAndSendOverdueNotifications(
+    options?: {
+      sendToAllMembers?: boolean;
+      includeSummary?: boolean;
+      emailSubject?: string;
+    },
+  ) {
+    console.log('🚀 Bắt đầu quy trình gửi thông báo nhắc trễ tự động...');
+
+    try {
+      // Bước 1 & 2: Query TẤT CẢ tasks từ DB và tính toán các trạng thái
+      console.log('📊 Bước 1-2: Đang query tasks từ DB và tính toán trạng thái...');
+      const tasks = await this.getOverdueTasks();
+      console.log(`✅ Đã lấy ${tasks.length} tasks từ database`);
+
+      // Bước 3: Nhóm tasks theo member
+      console.log('👥 Bước 3: Đang nhóm tasks theo member...');
+      const groupedData = await this.getOverdueTasksByMember();
+      console.log(`✅ Đã nhóm thành ${groupedData.tasksByMember.length} members`);
+
+      // Bước 4, 5, 6: Query User từ DB, format và gửi email
+      console.log('📧 Bước 4-6: Đang query User từ DB, format và gửi email...');
+      const result = await this.sendOverdueNotificationsToMembers(undefined, options);
+
+      console.log('✅ Hoàn thành quy trình gửi thông báo nhắc trễ!');
+
+      return {
+        success: true,
+        message: 'Đã hoàn thành quy trình gửi thông báo nhắc trễ tự động',
+        steps: {
+          step1_2: {
+            description: 'Query tasks từ DB và tính toán trạng thái',
+            totalTasks: tasks.length,
+            completed: true,
+          },
+          step3: {
+            description: 'Nhóm tasks theo member',
+            totalMembers: groupedData.tasksByMember.length,
+            summary: groupedData.summary,
+            completed: true,
+          },
+          step4_5_6: {
+            description: 'Query User từ DB, format và gửi email',
+            notificationsSent: result.notifications.filter((n) => n.sent).length,
+            notificationsFailed: result.notifications.filter((n) => !n.sent).length,
+            completed: true,
+          },
+        },
+        summary: result.summary,
+        notifications: result.notifications,
+        summaryMessage: result.summaryMessage,
+        sentAt: result.sentAt,
+      };
+    } catch (error: any) {
+      console.error('❌ Lỗi trong quy trình gửi thông báo nhắc trễ:', error.message);
+      return {
+        success: false,
+        error: error.message,
+        message: 'Có lỗi xảy ra trong quy trình gửi thông báo nhắc trễ',
+      };
+    }
+  }
+
+  /**
+   * Gửi thông báo nhắc trễ đến từng thành viên qua Gmail
+   * Email được lấy từ database (User table) dựa trên memberId
+   */
+  async sendOverdueNotificationsToMembers(
+    emailTo?: string | string[],
+    options?: {
+      sendToAllMembers?: boolean; // Gửi cho tất cả members (kể cả không có task quá hạn)
+      includeSummary?: boolean; // Bao gồm summary tổng hợp
+      emailSubject?: string; // Subject của email
+    },
+  ) {
+    const result = await this.getOverdueTasksByMember();
+    const { summary, tasksByMember } = result;
+
+    const today = new Date();
+    const formattedDate = `${today.getDate().toString().padStart(2, '0')}/${(today.getMonth() + 1).toString().padStart(2, '0')}/${today.getFullYear()}`;
+
+    const notifications: Array<{
+      memberName: string;
+      memberEmail: string | null;
+      memberId: number | null;
+      emailHtml: string;
+      emailText: string;
+      sent: boolean;
+      error?: string;
+      taskCount: number;
+    }> = [];
+
+    // Tạo transporter cho email
+    let transporter: nodemailer.Transporter | null = null;
+    try {
+      transporter = nodemailer.createTransport({
+        host: this.configService.get<string>('SMTP_HOST'),
+        port: this.configService.get<number>('SMTP_PORT'),
+        secure: this.configService.get<string>('SMTP_SECURE') === 'true',
+        auth: {
+          user: this.configService.get<string>('SMTP_USER'),
+          pass: this.configService.get<string>('SMTP_PASS'),
+        },
+      });
+    } catch (err: any) {
+      console.error('❌ Failed to create email transporter:', err.message);
+      return {
+        success: false,
+        error: 'Failed to initialize email transporter',
+        summary,
+        notifications: [],
+        sentAt: new Date().toISOString(),
+      };
+    }
+
+    // Gửi thông báo cho từng member có task cần thông báo
+    for (const memberData of tasksByMember) {
+      if (memberData.tasks.length === 0) continue;
+
+      // LẤY EMAIL TỪ DATABASE - Đảm bảo luôn lấy từ DB
+      let memberEmail: string | null = null;
+      let memberName: string = 'Unknown';
+
+      // Query lại từ database để đảm bảo dữ liệu mới nhất
+      if (memberData.memberId) {
+        try {
+          const user = await this.prisma.user.findUnique({
+            where: { id: memberData.memberId },
+            select: {
+              id: true,
+              email: true,
+              name: true,
+              username: true,
+            },
+          });
+
+          if (user) {
+            memberEmail = user.email || null;
+            memberName = user.name || user.username || 'Unknown';
+            console.log(`✅ Lấy thông tin từ DB - Member ID: ${memberData.memberId}, Name: ${memberName}, Email: ${memberEmail || 'KHÔNG CÓ'}`);
+          } else {
+            console.warn(`⚠️ Không tìm thấy user trong DB với ID: ${memberData.memberId}`);
+          }
+        } catch (err: any) {
+          console.error(`❌ Lỗi khi query user từ DB (ID: ${memberData.memberId}):`, err.message);
+        }
+      }
+
+      // Fallback: sử dụng dữ liệu từ relation nếu không query được
+      if (!memberEmail) {
+        memberEmail = memberData.memberEmail;
+        memberName = memberData.memberName;
+      }
+
+      // Chỉ gửi nếu member có email trong database
+      if (!memberEmail) {
+        console.warn(`⚠️ Member ${memberName} (ID: ${memberData.memberId}) KHÔNG CÓ EMAIL trong DB, bỏ qua`);
+        notifications.push({
+          memberName,
+          memberEmail: null,
+          memberId: memberData.memberId,
+          emailHtml: '',
+          emailText: '',
+          sent: false,
+          error: 'Member không có email trong database',
+          taskCount: memberData.tasks.length,
+        });
+        continue;
+      }
+
+      console.log(`📧 Chuẩn bị gửi email cho ${memberName} (${memberEmail}) - ${memberData.tasks.length} tasks`);
+
+      const emailHtml = this.formatOverdueEmailForMember(memberName, memberData.tasks);
+      const emailText = this.formatOverdueTextForMember(memberName, memberData.tasks);
+      const emailSubject =
+        options?.emailSubject ||
+        `🚨 Thông báo nhắc trễ - Bạn có ${memberData.tasks.length} task quá hạn`;
+
+      let sent = false;
+      let error: string | undefined;
+
+      // Gửi email - sử dụng email từ database
+      if (transporter && memberEmail) {
+        try {
+          await transporter.sendMail({
+            from:
+              this.configService.get<string>('EMAIL_FROM') ||
+              this.configService.get<string>('SMTP_USER'),
+            to: memberEmail, // Email lấy từ database
+            subject: emailSubject,
+            html: emailHtml,
+            text: emailText,
+          });
+          sent = true;
+          console.log(`✅ Email sent to ${memberName} (${memberEmail}) - Member ID: ${memberData.memberId}`);
+        } catch (err: any) {
+          error = err.message;
+          console.error(
+            `❌ Failed to send email to ${memberName} (${memberEmail}) - Member ID: ${memberData.memberId}:`,
+            err.message,
+          );
+        }
+      }
+
+      notifications.push({
+        memberName,
+        memberEmail,
+        memberId: memberData.memberId,
+        emailHtml,
+        emailText,
+        sent,
+        error,
+        taskCount: memberData.tasks.length,
+      });
+    }
+
+    // Tạo summary message nếu cần
+    let summaryMessage = '';
+    if (options?.includeSummary) {
+      summaryMessage = `📊 Task Summary Report — ${formattedDate}\n`;
+      summaryMessage += `• Total Tasks: ${summary.totalTasks}\n`;
+      summaryMessage += `• ✅ Completed: ${summary.totalCompleted} (${summary.percentCompleted})\n`;
+      summaryMessage += `• ⚠️ Overdue: ${summary.totalOverdue} (${summary.percentOverdue})\n\n`;
+
+      if (result.overdueTasks.length > 0) {
+        summaryMessage += `🚨 Overdue Tasks:\n`;
+        result.overdueTasks.forEach((t, i) => {
+          summaryMessage += `${i + 1}. ${t.task_id} — ${t.description || 'No description'}\n`;
+          summaryMessage += `   → Assigned to: ${t.assigned_member_name || 'N/A'}\n`;
+          summaryMessage += `   → Deadline: ${t.deadline_task || 'No deadline'}\n\n`;
+        });
+      } else {
+        summaryMessage += `✅ No overdue tasks today.\n\n`;
+      }
+    }
+
+    return {
+      success: true,
+      summary,
+      notifications,
+      summaryMessage: options?.includeSummary ? summaryMessage : undefined,
+      sentAt: new Date().toISOString(),
+    };
+  }
+
   private groupByStatus(items: any[], statusField: string) {
     const grouped: Record<string, number> = {};
     items.forEach((item) => {
@@ -3124,5 +3890,1136 @@ Generated at: ${timestamp}
       grouped[status] = (grouped[status] || 0) + 1;
     });
     return grouped;
+  }
+
+  /**
+   * Lấy thông tin trạng thái từ Jira API
+   * Hỗ trợ cả API Token và Basic Auth
+   */
+  async getJiraStatus(options?: {
+    jiraUrl?: string;
+    jiraEmail?: string;
+    jiraApiToken?: string;
+    jiraUsername?: string;
+    jiraPassword?: string;
+    issueKey?: string; // Jira issue key (VD: PROJ-123)
+    jql?: string; // JQL query để lấy nhiều issues
+  }) {
+    // Lấy config từ .env hoặc từ options
+    let jiraUrl =
+      options?.jiraUrl ||
+      this.configService.get<string>('JIRA_URL') ||
+      this.configService.get<string>('JIRA_BASE_URL');
+    
+    // Loại bỏ dấu "/" ở cuối URL nếu có
+    if (jiraUrl && jiraUrl.endsWith('/')) {
+      jiraUrl = jiraUrl.slice(0, -1);
+    }
+    
+    const jiraEmail = options?.jiraEmail || this.configService.get<string>('JIRA_EMAIL');
+    const jiraApiToken =
+      options?.jiraApiToken || this.configService.get<string>('JIRA_API_TOKEN');
+    const jiraUsername =
+      options?.jiraUsername || this.configService.get<string>('JIRA_USERNAME');
+    const jiraPassword =
+      options?.jiraPassword || this.configService.get<string>('JIRA_PASSWORD');
+
+    if (!jiraUrl) {
+      throw new Error('JIRA_URL không được cấu hình. Vui lòng cung cấp trong .env hoặc options');
+    }
+
+    // Xác định phương thức authentication
+    let authHeader = '';
+    if (jiraApiToken && jiraEmail) {
+      // API Token authentication (khuyến nghị)
+      const token = Buffer.from(`${jiraEmail}:${jiraApiToken}`).toString('base64');
+      authHeader = `Basic ${token}`;
+    } else if (jiraUsername && jiraPassword) {
+      // Basic Auth
+      const token = Buffer.from(`${jiraUsername}:${jiraPassword}`).toString('base64');
+      authHeader = `Basic ${token}`;
+    } else {
+      throw new Error(
+        'Cần cấu hình JIRA authentication: JIRA_EMAIL + JIRA_API_TOKEN hoặc JIRA_USERNAME + JIRA_PASSWORD',
+      );
+    }
+
+    try {
+      // Nếu có issueKey, lấy thông tin issue cụ thể
+      if (options?.issueKey) {
+        const issueKey = options.issueKey;
+        const response = await axios.get(`${jiraUrl}/rest/api/3/issue/${issueKey}`, {
+          headers: {
+            Authorization: authHeader,
+            Accept: 'application/json',
+          },
+        });
+
+        const issue = response.data;
+        return {
+          success: true,
+          issueKey: issue.key,
+          summary: issue.fields.summary,
+          status: issue.fields.status.name,
+          statusId: issue.fields.status.id,
+          statusCategory: issue.fields.status.statusCategory?.name || null,
+          priority: issue.fields.priority?.name || null,
+          assignee: issue.fields.assignee
+            ? {
+                name: issue.fields.assignee.displayName,
+                email: issue.fields.assignee.emailAddress,
+                accountId: issue.fields.assignee.accountId,
+              }
+            : null,
+          reporter: issue.fields.reporter
+            ? {
+                name: issue.fields.reporter.displayName,
+                email: issue.fields.reporter.emailAddress,
+                accountId: issue.fields.reporter.accountId,
+              }
+            : null,
+          created: issue.fields.created,
+          updated: issue.fields.updated,
+          dueDate: issue.fields.duedate || null,
+          description: issue.fields.description || null,
+          project: {
+            key: issue.fields.project.key,
+            name: issue.fields.project.name,
+            id: issue.fields.project.id,
+          },
+          issueType: issue.fields.issuetype.name,
+          labels: issue.fields.labels || [],
+          customFields: issue.fields, // Toàn bộ fields để có thể truy cập custom fields
+        };
+      }
+
+      // Nếu có JQL, tìm kiếm issues (sử dụng endpoint /rest/api/3/search với query params)
+      if (options?.jql) {
+        const jqlEncoded = encodeURIComponent(options.jql);
+        const response = await axios.get(
+          `${jiraUrl}/rest/api/3/search?jql=${jqlEncoded}&maxResults=100`,
+          {
+            headers: {
+              Authorization: authHeader,
+              Accept: 'application/json',
+            },
+          },
+        );
+
+        const issues = response.data.issues.map((issue: any) => ({
+          issueKey: issue.key,
+          summary: issue.fields.summary,
+          status: issue.fields.status.name,
+          statusId: issue.fields.status.id,
+          statusCategory: issue.fields.status.statusCategory?.name || null,
+          priority: issue.fields.priority?.name || null,
+          assignee: issue.fields.assignee
+            ? {
+                name: issue.fields.assignee.displayName,
+                email: issue.fields.assignee.emailAddress,
+                accountId: issue.fields.assignee.accountId,
+              }
+            : null,
+          created: issue.fields.created,
+          updated: issue.fields.updated,
+          dueDate: issue.fields.duedate || null,
+          description: issue.fields.description || null,
+          project: {
+            key: issue.fields.project.key,
+            name: issue.fields.project.name,
+          },
+          issueType: issue.fields.issuetype.name,
+        }));
+
+        return {
+          success: true,
+          total: response.data.total,
+          maxResults: response.data.maxResults,
+          startAt: response.data.startAt,
+          issues,
+        };
+      }
+
+      // Nếu không có issueKey và JQL, lấy issues được assign cho user từ email
+      // Jira API không hỗ trợ currentUser(), cần dùng email hoặc accountId
+      let defaultJql = '';
+      if (jiraEmail) {
+        // Escape email nếu có ký tự đặc biệt
+        const escapedEmail = jiraEmail.replace(/@/g, '\\u0040');
+        defaultJql = `assignee = "${escapedEmail}" ORDER BY updated DESC`;
+      } else {
+        // Nếu không có email, yêu cầu user cung cấp JQL hoặc issueKey
+        throw new Error(
+          'Cần cung cấp issueKey hoặc jql. Nếu muốn lấy issues của user, cần cung cấp JIRA_EMAIL trong config.',
+        );
+      }
+
+      const response = await axios.post(
+        `${jiraUrl}/rest/api/3/search/jql`,
+        {
+          jql: defaultJql,
+          maxResults: 50,
+        },
+        {
+          headers: {
+            Authorization: authHeader,
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+          },
+        },
+      );
+
+      const issues = response.data.issues.map((issue: any) => ({
+        issueKey: issue.key,
+        summary: issue.fields.summary,
+        status: issue.fields.status.name,
+        statusId: issue.fields.status.id,
+        statusCategory: issue.fields.status.statusCategory?.name || null,
+        priority: issue.fields.priority?.name || null,
+        assignee: issue.fields.assignee
+          ? {
+              name: issue.fields.assignee.displayName,
+              email: issue.fields.assignee.emailAddress,
+              accountId: issue.fields.assignee.accountId,
+            }
+          : null,
+        created: issue.fields.created,
+        updated: issue.fields.updated,
+        dueDate: issue.fields.duedate || null,
+        project: {
+          key: issue.fields.project.key,
+          name: issue.fields.project.name,
+        },
+        issueType: issue.fields.issuetype.name,
+      }));
+
+      return {
+        success: true,
+        total: response.data.total,
+        maxResults: response.data.maxResults,
+        startAt: response.data.startAt,
+        issues,
+      };
+    } catch (error: any) {
+      console.error('❌ Lỗi khi lấy thông tin từ Jira:', error.message);
+      console.error('Error stack:', error.stack);
+      
+      if (error.response) {
+        console.error('Response status:', error.response.status);
+        console.error('Response data:', error.response.data);
+        const errorMessage = error.response.data?.errorMessages?.join(', ') || 
+                            error.response.data?.message || 
+                            JSON.stringify(error.response.data);
+        throw new Error(`Jira API Error (${error.response.status}): ${errorMessage}`);
+      }
+      
+      // Nếu là lỗi từ code (throw Error), giữ nguyên message
+      if (error.message && error.message.includes('không được cấu hình') || 
+          error.message.includes('Cần cấu hình')) {
+        throw error;
+      }
+      
+      throw new Error(`Lỗi khi kết nối Jira: ${error.message}`);
+    }
+  }
+
+  /**
+   * Helper: Lấy danh sách tất cả issueKeys từ Jira
+   * Giúp bạn biết có những issueKeys nào trong Jira
+   */
+  async listAllJiraIssues(project?: string, maxResults: number = 50) {
+    try {
+      const jiraUrl =
+        this.configService.get<string>('JIRA_URL') ||
+        this.configService.get<string>('JIRA_BASE_URL');
+      const jiraEmail = this.configService.get<string>('JIRA_EMAIL');
+      const jiraApiToken = this.configService.get<string>('JIRA_API_TOKEN');
+
+      if (!jiraUrl) {
+        throw new Error('JIRA_URL không được cấu hình');
+      }
+
+      // Loại bỏ dấu "/" ở cuối URL
+      const cleanUrl = jiraUrl.endsWith('/') ? jiraUrl.slice(0, -1) : jiraUrl;
+
+      if (!jiraApiToken || !jiraEmail) {
+        throw new Error('Cần cấu hình JIRA_EMAIL và JIRA_API_TOKEN');
+      }
+
+      const token = Buffer.from(`${jiraEmail}:${jiraApiToken}`).toString('base64');
+      const authHeader = `Basic ${token}`;
+
+      // Tạo JQL query
+      let jql = '';
+      if (project) {
+        jql = `project = ${project} ORDER BY updated DESC`;
+      } else {
+        // Lấy tất cả issues từ tất cả projects
+        jql = `ORDER BY updated DESC`;
+      }
+
+      const jqlEncoded = encodeURIComponent(jql);
+      const response = await axios.get(
+        `${cleanUrl}/rest/api/3/search?jql=${jqlEncoded}&maxResults=${maxResults}`,
+        {
+          headers: {
+            Authorization: authHeader,
+            Accept: 'application/json',
+          },
+        },
+      );
+
+      const issues = response.data.issues.map((issue: any) => ({
+        issueKey: issue.key,
+        summary: issue.fields.summary,
+        status: issue.fields.status.name,
+        priority: issue.fields.priority?.name || null,
+        assignee: issue.fields.assignee
+          ? {
+              name: issue.fields.assignee.displayName,
+              email: issue.fields.assignee.emailAddress,
+            }
+          : null,
+        project: {
+          key: issue.fields.project.key,
+          name: issue.fields.project.name,
+        },
+        updated: issue.fields.updated,
+        created: issue.fields.created,
+      }));
+
+      return {
+        success: true,
+        total: response.data.total,
+        maxResults: response.data.maxResults,
+        issues,
+        issueKeys: issues.map((i: any) => i.issueKey), // Chỉ lấy danh sách issueKeys
+      };
+    } catch (error: any) {
+      console.error('❌ Lỗi khi lấy danh sách issues từ Jira:', error.message);
+      if (error.response) {
+        const errorMessage =
+          error.response.data?.errorMessages?.join(', ') ||
+          error.response.data?.message ||
+          JSON.stringify(error.response.data);
+        throw new Error(`Jira API Error (${error.response.status}): ${errorMessage}`);
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Lấy trạng thái của một issue cụ thể từ Jira
+   * Tái sử dụng getJiraStatus với issueKey
+   */
+  async getJiraIssueStatus(
+    issueKey: string,
+    options?: {
+      jiraUrl?: string;
+      jiraEmail?: string;
+      jiraApiToken?: string;
+      jiraUsername?: string;
+      jiraPassword?: string;
+    },
+  ) {
+    return this.getJiraStatus({
+      ...options,
+      issueKey,
+    });
+  }
+
+  /**
+   * Lấy danh sách issues từ Jira bằng JQL query
+   * Tái sử dụng getJiraStatus với JQL
+   */
+  async getJiraIssuesByJQL(
+    jql: string,
+    options?: {
+      jiraUrl?: string;
+      jiraEmail?: string;
+      jiraApiToken?: string;
+      jiraUsername?: string;
+      jiraPassword?: string;
+    },
+  ) {
+    return this.getJiraStatus({
+      ...options,
+      jql,
+    });
+  }
+
+  /**
+   * Đồng bộ thông tin từ Jira vào database
+   * Cập nhật tasks trong DB dựa trên thông tin từ Jira
+   */
+  async syncJiraToDatabase(options?: {
+    issueKey?: string; // Sync một issue cụ thể
+    jql?: string; // Sync nhiều issues theo JQL
+    jiraUrl?: string;
+    jiraEmail?: string;
+    jiraApiToken?: string;
+    jiraUsername?: string;
+    jiraPassword?: string;
+    updateAll?: boolean; // Sync tất cả tasks có jiraIssueId trong DB
+  }) {
+    console.log('🔄 Bắt đầu đồng bộ Jira vào database...');
+
+    try {
+      let jiraIssues: any[] = [];
+
+      // Nếu có issueKey, sync issue đó
+      if (options?.issueKey) {
+        const result = await this.getJiraStatus({
+          issueKey: options.issueKey,
+          jiraUrl: options.jiraUrl,
+          jiraEmail: options.jiraEmail,
+          jiraApiToken: options.jiraApiToken,
+          jiraUsername: options.jiraUsername,
+          jiraPassword: options.jiraPassword,
+        });
+        // Khi có issueKey, result là object đơn, không phải array
+        jiraIssues = [result];
+      }
+      // Nếu có JQL, sync các issues match JQL
+      else if (options?.jql) {
+        const result = await this.getJiraStatus({
+          jql: options.jql,
+          jiraUrl: options.jiraUrl,
+          jiraEmail: options.jiraEmail,
+          jiraApiToken: options.jiraApiToken,
+          jiraUsername: options.jiraUsername,
+          jiraPassword: options.jiraPassword,
+        });
+        jiraIssues = result.issues || [];
+      }
+      // Nếu updateAll, lấy tất cả tasks có jiraIssueId và sync
+      else if (options?.updateAll) {
+        // Lấy tất cả tasks có jiraIssueId từ DB
+        const tasksWithJira = await this.prisma.task.findMany({
+          where: {
+            jiraIssueId: { not: null },
+          },
+          select: {
+            jiraIssueId: true,
+          },
+        });
+
+        if (tasksWithJira.length === 0) {
+          return {
+            success: true,
+            message: 'Không có task nào có jiraIssueId để sync',
+            synced: 0,
+            updated: 0,
+            created: 0,
+          };
+        }
+
+        // Lấy thông tin từ Jira cho từng issue
+        const issueKeys = tasksWithJira
+          .map((t) => t.jiraIssueId)
+          .filter(Boolean) as string[];
+
+        if (issueKeys.length === 0) {
+          return {
+            success: true,
+            message: 'Không có issueKey nào để sync',
+            synced: 0,
+            updated: 0,
+            created: 0,
+          };
+        }
+
+        // Jira chỉ cho phép tối đa 100 issues trong IN clause, chia nhỏ nếu cần
+        const batchSize = 100;
+        const allIssues: any[] = [];
+
+        for (let i = 0; i < issueKeys.length; i += batchSize) {
+          const batch = issueKeys.slice(i, i + batchSize);
+          const jql = `key IN (${batch.join(', ')})`;
+          const result = await this.getJiraStatus({
+            jql,
+            jiraUrl: options?.jiraUrl,
+            jiraEmail: options?.jiraEmail,
+            jiraApiToken: options?.jiraApiToken,
+            jiraUsername: options?.jiraUsername,
+            jiraPassword: options?.jiraPassword,
+          });
+          if (result.issues) {
+            allIssues.push(...result.issues);
+          }
+        }
+
+        jiraIssues = allIssues;
+      }
+      // Không có mặc định - yêu cầu user cung cấp điều kiện
+      else {
+        throw new Error(
+          'Cần cung cấp issueKey, jql, hoặc updateAll=true để sync. Không thể sync mà không có điều kiện cụ thể.',
+        );
+      }
+
+      if (jiraIssues.length === 0) {
+        return {
+          success: true,
+          message: 'Không có issues nào để sync',
+          synced: 0,
+          updated: 0,
+          created: 0,
+        };
+      }
+
+      // Lấy danh sách users từ DB để map email -> userId
+      const allUsers = await this.prisma.user.findMany({
+        select: {
+          id: true,
+          email: true,
+          jiraUserId: true,
+        },
+      });
+
+      const userMapByEmail = new Map(allUsers.map((u) => [u.email, u.id]));
+      const userMapByJiraId = new Map(
+        allUsers.filter((u) => u.jiraUserId).map((u) => [u.jiraUserId, u.id]),
+      );
+
+      let updated = 0;
+      let created = 0;
+      const errors: string[] = [];
+
+      // Sync từng issue vào DB
+      for (const jiraIssue of jiraIssues) {
+        try {
+          // Xử lý cả object đơn (từ issueKey) và object trong array (từ JQL)
+          const issueKey = jiraIssue.issueKey || jiraIssue.key;
+          if (!issueKey) {
+            console.warn('⚠️ Issue không có key, bỏ qua');
+            continue;
+          }
+
+          // Tìm task trong DB theo jiraIssueId
+          const existingTask = await this.prisma.task.findFirst({
+            where: {
+              jiraIssueId: issueKey,
+            },
+          });
+
+          // Map assignee từ Jira sang userId trong DB
+          let assignedToId: number | null = null;
+          if (jiraIssue.assignee) {
+            // Thử tìm theo email trước
+            if (jiraIssue.assignee.email) {
+              assignedToId = userMapByEmail.get(jiraIssue.assignee.email) || null;
+            }
+            // Nếu không có, thử tìm theo accountId (jiraUserId)
+            if (!assignedToId && jiraIssue.assignee.accountId) {
+              assignedToId = userMapByJiraId.get(jiraIssue.assignee.accountId) || null;
+            }
+          }
+
+          // Map status từ Jira
+          const jiraStatus = jiraIssue.status || 'Unknown';
+          // Map priority từ Jira
+          const jiraPriority = jiraIssue.priority || null;
+
+          // Map due date từ Jira
+          let dueDate: Date | null = null;
+          if (jiraIssue.dueDate) {
+            dueDate = new Date(jiraIssue.dueDate);
+          }
+
+          const taskData: any = {
+            title: jiraIssue.summary || `Task ${issueKey}`,
+            description: jiraIssue.description || null,
+            status: jiraStatus,
+            priority: jiraPriority,
+            jiraIssueId: issueKey,
+            assignedToId: assignedToId,
+            updatedAt: new Date(),
+          };
+
+          if (existingTask) {
+            // Update task hiện có
+            await this.prisma.task.update({
+              where: { id: existingTask.id },
+              data: taskData,
+            });
+            updated++;
+            console.log(`✅ Updated task ${existingTask.id} với Jira issue ${issueKey}`);
+          } else {
+            // Tạo task mới nếu chưa có
+            // Cần projectId, lấy project đầu tiên hoặc yêu cầu user cung cấp
+            const firstProject = await this.prisma.project.findFirst();
+            if (!firstProject) {
+              errors.push(`Không tìm thấy project nào để tạo task cho ${issueKey}`);
+              continue;
+            }
+
+            await this.prisma.task.create({
+              data: {
+                ...taskData,
+                projectId: firstProject.id,
+              },
+            });
+            created++;
+            console.log(`✅ Created task mới cho Jira issue ${issueKey}`);
+          }
+        } catch (error: any) {
+          const issueKey = jiraIssue.issueKey || jiraIssue.key || 'Unknown';
+          errors.push(`Lỗi khi sync ${issueKey}: ${error.message}`);
+          console.error(`❌ Lỗi khi sync issue ${issueKey}:`, error.message);
+        }
+      }
+
+      return {
+        success: true,
+        message: `Đã đồng bộ ${jiraIssues.length} issues từ Jira`,
+        synced: jiraIssues.length,
+        updated,
+        created,
+        errors: errors.length > 0 ? errors : undefined,
+      };
+    } catch (error: any) {
+      console.error('❌ Lỗi khi đồng bộ Jira vào database:', error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * API TỔNG HỢP: Lấy status từ Project → Task, kiểm tra thay đổi ở Jira và cập nhật DB
+   * Tự động sync tất cả projects và tasks có jiraIssueId
+   */
+  async syncAllJiraChanges(options?: {
+    jiraUrl?: string;
+    jiraEmail?: string;
+    jiraApiToken?: string;
+    jiraUsername?: string;
+    jiraPassword?: string;
+    projectKey?: string; // Project key để sync (VD: PROJ, SCRUM). Nếu không có, sẽ sync tất cả projects
+    issueKeys?: string[]; // Danh sách issueKeys cụ thể để sync (VD: ["PROJ-1", "PROJ-2"])
+  }) {
+    console.log('🔄 Bắt đầu kiểm tra và đồng bộ tất cả thay đổi từ Jira...');
+
+    try {
+      // 1. Lấy tất cả Projects và Tasks có jiraIssueId từ DB
+      const [projects, tasks] = await Promise.all([
+        this.prisma.project.findMany({
+          select: {
+            id: true,
+            name: true,
+            status: true,
+          },
+        }),
+        this.prisma.task.findMany({
+          where: {
+            jiraIssueId: { not: null },
+          },
+          include: {
+            project: {
+              select: {
+                id: true,
+                name: true,
+                status: true,
+              },
+            },
+            assignedTo: {
+              select: {
+                id: true,
+                email: true,
+                jiraUserId: true,
+              },
+            },
+          },
+        }),
+      ]);
+
+      console.log(`📊 Tìm thấy ${tasks.length} tasks có jiraIssueId trong DB`);
+
+      // 2. Lấy TẤT CẢ issues từ Jira (tự động đồng bộ)
+      let allJiraIssues: any[] = [];
+      
+      // Nếu có danh sách issueKeys cụ thể, dùng chúng
+      if (options?.issueKeys && options.issueKeys.length > 0) {
+        console.log(`🔍 Đang lấy ${options.issueKeys.length} issues cụ thể từ Jira...`);
+        for (const issueKey of options.issueKeys) {
+          try {
+            const result = await this.getJiraStatus({
+              issueKey,
+              ...options,
+            });
+            if (result && result.issueKey) {
+              // Convert single issue format to array format
+              allJiraIssues.push({
+                issueKey: result.issueKey,
+                summary: result.summary,
+                status: result.status,
+                statusId: result.statusId,
+                statusCategory: result.statusCategory,
+                priority: result.priority,
+                assignee: result.assignee,
+                created: result.created,
+                updated: result.updated,
+                dueDate: result.dueDate,
+                description: result.description,
+                project: result.project,
+                issueType: result.issueType,
+              });
+            }
+          } catch (error: any) {
+            console.warn(`⚠️ Không lấy được issue ${issueKey}: ${error.message}`);
+          }
+        }
+        console.log(`✅ Lấy được ${allJiraIssues.length}/${options.issueKeys.length} issues từ danh sách`);
+      } else {
+        // TỰ ĐỘNG: Lấy tất cả issues từ TẤT CẢ projects trong Jira
+        console.log(`🔄 Tự động lấy TẤT CẢ issues từ Jira...`);
+        
+        // Nếu có projectKey cụ thể, chỉ lấy từ project đó
+        if (options?.projectKey) {
+          const projectKey = options.projectKey;
+          console.log(`🔍 Lấy issues từ project ${projectKey}...`);
+          
+          // Cách 1: Thử lấy từ project cụ thể bằng JQL
+          try {
+            const jql = `project = ${projectKey} ORDER BY key ASC`;
+            const result = await this.getJiraStatus({
+              jql,
+              ...options,
+            });
+            if (result && result.issues && Array.isArray(result.issues) && result.issues.length > 0) {
+              allJiraIssues = result.issues;
+              console.log(`✅ Lấy được ${allJiraIssues.length} issues từ Jira project ${projectKey} (JQL)`);
+            }
+          } catch (error: any) {
+            console.warn(`⚠️ Không lấy được issues bằng JQL từ project ${projectKey}: ${error.message}`);
+          }
+          
+          // Cách 2: Nếu không lấy được bằng JQL, thử lấy từng issue cụ thể
+          if (allJiraIssues.length === 0) {
+            console.log(`🔍 Thử lấy từng issue cụ thể từ ${projectKey}-1 đến ${projectKey}-50...`);
+            const issueKeysToTry = Array.from({ length: 50 }, (_, i) => `${projectKey}-${i + 1}`);
+            
+            for (const issueKey of issueKeysToTry) {
+              try {
+                const result = await this.getJiraStatus({
+                  issueKey,
+                  ...options,
+                });
+                if (result && result.issueKey) {
+                  allJiraIssues.push({
+                    issueKey: result.issueKey,
+                    summary: result.summary,
+                    status: result.status,
+                    statusId: result.statusId,
+                    statusCategory: result.statusCategory,
+                    priority: result.priority,
+                    assignee: result.assignee,
+                    created: result.created,
+                    updated: result.updated,
+                    dueDate: result.dueDate,
+                    description: result.description,
+                    project: result.project,
+                    issueType: result.issueType,
+                  });
+                }
+              } catch (error: any) {
+                continue;
+              }
+            }
+            console.log(`✅ Lấy được ${allJiraIssues.length} issues từ project ${projectKey}`);
+          }
+        } else {
+          // KHÔNG có projectKey → Lấy từ TẤT CẢ projects
+          console.log(`🌐 Lấy issues từ TẤT CẢ projects trong Jira...`);
+          
+          // Bước 1: Lấy danh sách tất cả projects
+          try {
+            const jiraUrl =
+              options?.jiraUrl ||
+              this.configService.get<string>('JIRA_URL') ||
+              this.configService.get<string>('JIRA_BASE_URL');
+            const jiraEmail = options?.jiraEmail || this.configService.get<string>('JIRA_EMAIL');
+            const jiraApiToken =
+              options?.jiraApiToken || this.configService.get<string>('JIRA_API_TOKEN');
+
+            if (jiraUrl && jiraEmail && jiraApiToken) {
+              const cleanUrl = jiraUrl.endsWith('/') ? jiraUrl.slice(0, -1) : jiraUrl;
+              const token = Buffer.from(`${jiraEmail}:${jiraApiToken}`).toString('base64');
+              const authHeader = `Basic ${token}`;
+
+              // Lấy danh sách projects
+              const projectsResponse = await axios.get(`${cleanUrl}/rest/api/3/project`, {
+                headers: {
+                  Authorization: authHeader,
+                  Accept: 'application/json',
+                },
+              });
+
+              const allProjects = projectsResponse.data || [];
+              console.log(`📋 Tìm thấy ${allProjects.length} projects: ${allProjects.map((p: any) => p.key).join(', ')}`);
+
+              // Bước 2: Lấy issues từ từng project
+              for (const project of allProjects) {
+                const projectKey = project.key;
+                console.log(`🔍 Đang lấy issues từ project ${projectKey}...`);
+
+                try {
+                  // Thử lấy bằng JQL
+                  const jql = `project = ${projectKey} ORDER BY key ASC`;
+                  const result = await this.getJiraStatus({
+                    jql,
+                    ...options,
+                  });
+                  if (result && result.issues && Array.isArray(result.issues) && result.issues.length > 0) {
+                    allJiraIssues.push(...result.issues);
+                    console.log(`  ✅ Lấy được ${result.issues.length} issues từ ${projectKey}`);
+                  }
+                } catch (error: any) {
+                  console.warn(`  ⚠️ Không lấy được issues từ ${projectKey} bằng JQL: ${error.message}`);
+                  
+                  // Fallback: Thử lấy từng issue cụ thể (projectKey-1 đến projectKey-20)
+                  let foundIssues = 0;
+                  for (let i = 1; i <= 20; i++) {
+                    try {
+                      const issueKey = `${projectKey}-${i}`;
+                      const result = await this.getJiraStatus({
+                        issueKey,
+                        ...options,
+                      });
+                      if (result && result.issueKey) {
+                        allJiraIssues.push({
+                          issueKey: result.issueKey,
+                          summary: result.summary,
+                          status: result.status,
+                          statusId: result.statusId,
+                          statusCategory: result.statusCategory,
+                          priority: result.priority,
+                          assignee: result.assignee,
+                          created: result.created,
+                          updated: result.updated,
+                          dueDate: result.dueDate,
+                          description: result.description,
+                          project: result.project,
+                          issueType: result.issueType,
+                        });
+                        foundIssues++;
+                      }
+                    } catch {
+                      // Issue không tồn tại, tiếp tục
+                      if (foundIssues === 0 && i > 5) break; // Nếu không tìm thấy issue nào sau 5 lần thử, dừng
+                    }
+                  }
+                  if (foundIssues > 0) {
+                    console.log(`  ✅ Lấy được ${foundIssues} issues từ ${projectKey} (từng issue)`);
+                  }
+                }
+              }
+            }
+          } catch (error: any) {
+            console.error(`❌ Lỗi khi lấy danh sách projects: ${error.message}`);
+          }
+
+          // Bước 3: Nếu vẫn không lấy được, thử lấy TẤT CẢ issues không filter
+          if (allJiraIssues.length === 0) {
+            console.log(`🔍 Thử lấy tất cả issues không filter...`);
+            try {
+              const jql = 'ORDER BY key ASC';
+              const result = await this.getJiraStatus({
+                jql,
+                ...options,
+              });
+              if (result && result.issues && Array.isArray(result.issues) && result.issues.length > 0) {
+                allJiraIssues = result.issues;
+                console.log(`✅ Lấy được ${allJiraIssues.length} issues từ tất cả projects (JQL không filter)`);
+              }
+            } catch (error: any) {
+              console.warn(`⚠️ Không lấy được issues bằng JQL không filter: ${error.message}`);
+            }
+          }
+
+          console.log(`✅ Tổng cộng lấy được ${allJiraIssues.length} issues từ tất cả projects`);
+        }
+      }
+
+      if (allJiraIssues.length === 0) {
+        return {
+          success: true,
+          message: 'Không tìm thấy issues nào trong Jira để sync',
+          projects: {
+            total: projects.length,
+            synced: 0,
+            updated: 0,
+          },
+          tasks: {
+            total: tasks.length,
+            synced: 0,
+            updated: 0,
+            created: 0,
+          },
+          changes: [],
+        };
+      }
+
+      const jiraIssues = allJiraIssues;
+      console.log(`✅ Lấy được ${jiraIssues.length} issues từ Jira`);
+
+      // 4. Tạo map để tra cứu nhanh
+      const jiraIssueMap = new Map(
+        jiraIssues.map((issue: any) => [issue.issueKey, issue]),
+      );
+
+      // 5. Lấy danh sách users để map assignee
+      const allUsers = await this.prisma.user.findMany({
+        select: {
+          id: true,
+          email: true,
+          jiraUserId: true,
+        },
+      });
+
+      const userMapByEmail = new Map(allUsers.map((u) => [u.email, u.id]));
+      const userMapByJiraId = new Map(
+        allUsers.filter((u) => u.jiraUserId).map((u) => [u.jiraUserId, u.id]),
+      );
+
+      // Helper function: Convert Jira description (doc format) to plain text string
+      const convertJiraDescriptionToString = (description: any): string | null => {
+        if (!description) return null;
+        if (typeof description === 'string') return description;
+        if (typeof description !== 'object') return null;
+
+        // Jira doc format: { type: "doc", version: 1, content: [...] }
+        if (description.type === 'doc' && Array.isArray(description.content)) {
+          const extractText = (node: any): string => {
+            if (typeof node === 'string') return node;
+            if (node.type === 'text' && node.text) return node.text;
+            if (node.type === 'paragraph' && Array.isArray(node.content)) {
+              return node.content.map(extractText).join('');
+            }
+            if (Array.isArray(node.content)) {
+              return node.content.map(extractText).join('');
+            }
+            return '';
+          };
+          return description.content.map(extractText).join('\n').trim() || null;
+        }
+
+        // Fallback: try to stringify
+        try {
+          return JSON.stringify(description);
+        } catch {
+          return null;
+        }
+      };
+
+      // 6. So sánh và cập nhật
+      const changes: Array<{
+        type: 'task' | 'project';
+        id: number;
+        jiraKey: string;
+        field: string;
+        oldValue: any;
+        newValue: any;
+      }> = [];
+
+      let tasksUpdated = 0;
+      let tasksCreated = 0;
+      const errors: string[] = [];
+
+      for (const task of tasks) {
+        try {
+          const jiraIssueId = task.jiraIssueId;
+          if (!jiraIssueId) continue;
+
+          const jiraIssue: any = jiraIssueMap.get(jiraIssueId);
+          if (!jiraIssue) {
+            console.warn(`⚠️ Không tìm thấy issue ${jiraIssueId} trong Jira`);
+            continue;
+          }
+
+          // So sánh và ghi nhận thay đổi
+          const updates: any = {};
+          let hasChanges = false;
+
+          // So sánh status
+          const jiraStatus = jiraIssue?.status || 'Unknown';
+          if (task.status !== jiraStatus) {
+            updates.status = jiraStatus;
+            changes.push({
+              type: 'task',
+              id: task.id,
+              jiraKey: jiraIssueId,
+              field: 'status',
+              oldValue: task.status,
+              newValue: jiraStatus,
+            });
+            hasChanges = true;
+          }
+
+          // So sánh priority
+          const jiraPriority = jiraIssue?.priority || null;
+          if (task.priority !== jiraPriority) {
+            updates.priority = jiraPriority;
+            changes.push({
+              type: 'task',
+              id: task.id,
+              jiraKey: jiraIssueId,
+              field: 'priority',
+              oldValue: task.priority,
+              newValue: jiraPriority,
+            });
+            hasChanges = true;
+          }
+
+          // So sánh title/summary
+          const jiraSummary = jiraIssue?.summary || '';
+          if (task.title !== jiraSummary) {
+            updates.title = jiraSummary;
+            changes.push({
+              type: 'task',
+              id: task.id,
+              jiraKey: jiraIssueId,
+              field: 'title',
+              oldValue: task.title,
+              newValue: jiraSummary,
+            });
+            hasChanges = true;
+          }
+
+          // So sánh description - convert Jira format sang string
+          const jiraDescriptionRaw = jiraIssue?.description || null;
+          const jiraDescriptionString = convertJiraDescriptionToString(jiraDescriptionRaw);
+          if (task.description !== jiraDescriptionString) {
+            updates.description = jiraDescriptionString;
+            changes.push({
+              type: 'task',
+              id: task.id,
+              jiraKey: jiraIssueId,
+              field: 'description',
+              oldValue: task.description,
+              newValue: jiraDescriptionString,
+            });
+            hasChanges = true;
+          }
+
+          // So sánh assignee
+          let newAssignedToId: number | null = null;
+          if (jiraIssue?.assignee) {
+            if (jiraIssue.assignee.email) {
+              newAssignedToId = userMapByEmail.get(jiraIssue.assignee.email) || null;
+            }
+            if (!newAssignedToId && jiraIssue.assignee.accountId) {
+              newAssignedToId = userMapByJiraId.get(jiraIssue.assignee.accountId) || null;
+            }
+          }
+
+          if (task.assignedToId !== newAssignedToId) {
+            updates.assignedToId = newAssignedToId;
+            changes.push({
+              type: 'task',
+              id: task.id,
+              jiraKey: jiraIssueId,
+              field: 'assignedToId',
+              oldValue: task.assignedToId,
+              newValue: newAssignedToId,
+            });
+            hasChanges = true;
+          }
+
+          // Cập nhật nếu có thay đổi
+          if (hasChanges) {
+            updates.updatedAt = new Date();
+            await this.prisma.task.update({
+              where: { id: task.id },
+              data: updates,
+            });
+            tasksUpdated++;
+            console.log(`✅ Updated task ${task.id} (${jiraIssueId}) với ${Object.keys(updates).length} thay đổi`);
+          }
+        } catch (error: any) {
+          const errorMsg = `Lỗi khi sync task ${task.id} (${task.jiraIssueId}): ${error.message}`;
+          errors.push(errorMsg);
+          console.error(`❌ ${errorMsg}`);
+        }
+      }
+
+      // 7. Tạo tasks mới cho các issues trong Jira nhưng chưa có trong DB
+      const existingIssueKeys = new Set(tasks.map((t) => t.jiraIssueId).filter(Boolean));
+      const newIssues = jiraIssues.filter((issue: any) => !existingIssueKeys.has(issue.issueKey));
+
+      for (const jiraIssue of newIssues) {
+        try {
+          const issue: any = jiraIssue;
+          // Map assignee
+          let assignedToId: number | null = null;
+          if (issue?.assignee) {
+            if (issue.assignee.email) {
+              assignedToId = userMapByEmail.get(issue.assignee.email) || null;
+            }
+            if (!assignedToId && issue.assignee.accountId) {
+              assignedToId = userMapByJiraId.get(issue.assignee.accountId) || null;
+            }
+          }
+
+          // Tìm project từ jiraIssue.project hoặc dùng project đầu tiên
+          let projectId = projects[0]?.id;
+          if (!projectId) {
+            const firstProject = await this.prisma.project.findFirst();
+            projectId = firstProject?.id || 1; // Fallback
+          }
+
+          // Convert description từ Jira format sang string
+          const descriptionString = convertJiraDescriptionToString(issue?.description);
+
+          await this.prisma.task.create({
+            data: {
+              projectId,
+              title: issue?.summary || `Task ${issue?.issueKey}`,
+              description: descriptionString,
+              status: issue?.status || 'To Do',
+              priority: issue?.priority || null,
+              jiraIssueId: issue?.issueKey,
+              assignedToId,
+            },
+          });
+
+          tasksCreated++;
+          changes.push({
+            type: 'task',
+            id: 0, // New task
+            jiraKey: issue?.issueKey || 'Unknown',
+            field: 'created',
+            oldValue: null,
+            newValue: 'New task created',
+          });
+          console.log(`✅ Created task mới cho Jira issue ${issue?.issueKey}`);
+        } catch (error: any) {
+          const issueKey = (jiraIssue as any)?.issueKey || 'Unknown';
+          const errorMsg = `Lỗi khi tạo task mới cho ${issueKey}: ${error.message}`;
+          errors.push(errorMsg);
+          console.error(`❌ ${errorMsg}`);
+        }
+      }
+
+      return {
+        success: true,
+        message: `Đã kiểm tra và đồng bộ ${jiraIssues.length} issues từ Jira`,
+        projects: {
+          total: projects.length,
+          synced: 0, // Chưa implement sync projects
+          updated: 0,
+        },
+        tasks: {
+          total: tasks.length,
+          synced: jiraIssues.length,
+          updated: tasksUpdated,
+          created: tasksCreated,
+        },
+        changes,
+        errors: errors.length > 0 ? errors : undefined,
+      };
+    } catch (error: any) {
+      console.error('❌ Lỗi khi đồng bộ tất cả thay đổi từ Jira:', error.message);
+      throw error;
+    }
   }
 }
