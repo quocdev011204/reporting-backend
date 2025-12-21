@@ -1987,30 +1987,47 @@ ${csv}`;
         throw new Error('Cannot extract file ID from chartUrl');
       }
 
-      // Đảm bảo file đã được share public
-      const fileInfo = await drive.files.get({
-        fileId: fileId,
-        fields: 'id,name,permissions',
-      });
-
+      // Đảm bảo file đã được share public với retry
       let isPublic = false;
-      if (fileInfo.data.permissions) {
-        isPublic = fileInfo.data.permissions.some(
-          (p: any) => p.type === 'anyone' && p.role !== undefined,
-        );
-      }
+      let retries = 3;
 
-      if (!isPublic) {
-        await drive.permissions.create({
-          fileId: fileId,
-          requestBody: {
-            role: 'reader',
-            type: 'anyone',
-          },
-        });
-        await new Promise(resolve => setTimeout(resolve, 2000));
-      }
+      while (!isPublic && retries > 0) {
+        try {
+          const fileInfo = await drive.files.get({
+            fileId: fileId,
+            fields: 'id,name,permissions',
+          });
 
+          if (fileInfo.data.permissions) {
+            isPublic = fileInfo.data.permissions.some(
+              (p: any) => p.type === 'anyone' && p.role !== undefined,
+            );
+          }
+
+          if (!isPublic) {
+            console.log(`🔄 Setting public permission for chart (attempt ${4 - retries}/3)...`);
+            await drive.permissions.create({
+              fileId: fileId,
+              requestBody: {
+                role: 'reader',
+                type: 'anyone',
+              },
+            });
+
+            // Đợi permission apply
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            isPublic = true; // Giả định permission đã apply
+          }
+        } catch (error: any) {
+          console.warn(`⚠️ Permission check/set failed (${retries} retries left):`, error.message);
+          retries--;
+          if (retries > 0) {
+            await new Promise(resolve => setTimeout(resolve, 2000));
+          } else {
+            throw error;
+          }
+        }
+      }
       // Lấy document để tìm vị trí chèn
       const document = await docs.documents.get({
         documentId: documentId,
@@ -2053,24 +2070,16 @@ ${csv}`;
       // Danh sách các Google Drive URL formats để thử
       const urlFormats: Array<{ name: string; uri: string }> = [
         {
-          name: 'thumbnail-large',
-          uri: `https://drive.google.com/thumbnail?id=${fileId}&sz=w625-h309`,
+          name: 'lh3-googleusercontent',
+          uri: `https://lh3.googleusercontent.com/d/${fileId}`,
         },
-        // {
-        //   name: 'thumbnail-medium',
-        //   uri: `https://drive.google.com/thumbnail?id=${fileId}&sz=w700-h400`,
-        // },
-        // {
-        //   name: 'simple-uc',
-        //   uri: `https://drive.google.com/uc?id=${fileId}`,
-        // },
         {
           name: 'export-view',
           uri: `https://drive.google.com/uc?export=view&id=${fileId}`,
         },
         {
-          name: 'lh3-googleusercontent',
-          uri: `https://lh3.googleusercontent.com/d/${fileId}`,
+          name: 'thumbnail-large',
+          uri: `https://drive.google.com/thumbnail?id=${fileId}&sz=w625-h309`,
         },
       ];
 
@@ -2861,6 +2870,25 @@ ${csv}`;
     emailSubject?: string,
     documentId?: string, // Google Docs document ID
   ) {
+    // Tự động extract documentId nếu không được truyền trực tiếp
+    // Hỗ trợ nhiều cấu trúc dữ liệu từ n8n
+    if (!documentId) {
+      // Thử tìm trong aiReportResult
+      if (aiReportResult?.googleDoc?.documentId) {
+        documentId = aiReportResult.googleDoc.documentId;
+      } else if (aiReportResult?.documentId) {
+        documentId = aiReportResult.documentId;
+      }
+      // Thử tìm trong chartResult
+      else if (chartResult?.googleDoc?.documentId) {
+        documentId = chartResult.googleDoc.documentId;
+      } else if (chartResult?.documentId) {
+        documentId = chartResult.documentId;
+      }
+
+      console.log('📄 Auto-extracted documentId:', documentId || 'not found');
+    }
+
     // Format message từ kết quả 2 nhánh
     const timestamp = new Date().toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' });
 
@@ -2919,6 +2947,7 @@ ${csv}`;
     // Nếu có documentId, hiển thị link báo cáo ở đầu
     if (documentId) {
       const documentUrl = `https://docs.google.com/document/d/${documentId}/edit`;
+      const driveUrl = `https://drive.google.com/file/d/${documentId}/view`;
       emailHtml += `
         <div style="background: #E8F5E9; padding: 15px; border-radius: 5px; margin: 15px 0;">
           <h3 style="color: #2E7D32; margin-top: 0;">📄 Báo cáo chi tiết</h3>
@@ -2927,26 +2956,32 @@ ${csv}`;
               ➜ Xem báo cáo đầy đủ tại Google Docs
             </a>
           </p>
+          <p style="margin: 5px 0;">
+            <a href="${driveUrl}" style="color: #1976D2; text-decoration: none; font-weight: bold;">
+              💾 Tải xuống từ Google Drive
+            </a>
+          </p>
         </div>
       `;
     }
 
-    if (aiReportResult) {
-      emailHtml += `
-        <h3 style="color: #2196F3;">🤖 AI Report</h3>
-        <ul>
-      `;
-      if (aiReportResult.prompt) {
-        emailHtml += `<li>Prompt đã được tạo</li>`;
-      }
-      if (aiReportResult.aiAgent) {
-        emailHtml += `<li>AI Agent đã xử lý</li>`;
-      }
-      if (aiReportResult.groqChat) {
-        emailHtml += `<li>Groq Chat đã hoàn thành</li>`;
-      }
-      emailHtml += `</ul>`;
-    }
+    // Bỏ phần AI Report status - không cần thiết
+    // if (aiReportResult) {
+    //   emailHtml += `
+    //     <h3 style="color: #2196F3;">🤖 AI Report</h3>
+    //     <ul>
+    //   `;
+    //   if (aiReportResult.prompt) {
+    //     emailHtml += `<li>Prompt đã được tạo</li>`;
+    //   }
+    //   if (aiReportResult.aiAgent) {
+    //     emailHtml += `<li>AI Agent đã xử lý</li>`;
+    //   }
+    //   if (aiReportResult.groqChat) {
+    //     emailHtml += `<li>Groq Chat đã hoàn thành</li>`;
+    //   }
+    //   emailHtml += `</ul>`;
+    // }
 
     if (chartResult) {
       emailHtml += `
@@ -3042,6 +3077,9 @@ Generated at: ${timestamp}
         });
 
         // Gửi email
+        const requestId = `${Date.now()}-${Math.random().toString(36).substring(7)}`;
+        console.log(`📧 Sending email [${requestId}] to:`, recipients.join(', '));
+
         await transporter.sendMail({
           from: this.configService.get<string>('EMAIL_FROM') || this.configService.get<string>('SMTP_USER'),
           to: recipients.join(', '),
@@ -3051,7 +3089,7 @@ Generated at: ${timestamp}
         });
 
         emailSent = true;
-        console.log('✅ Email sent successfully to:', recipients.join(', '));
+        console.log(`✅ Email sent successfully [${requestId}] to:`, recipients.join(', '));
       } catch (error: any) {
         emailError = error.message;
         console.error('❌ Failed to send email:', error.message);

@@ -98,6 +98,8 @@ model Report {
   value       Int?
   type        String?  @db.VarChar(50)
   data        Json?
+  googleDocId String?  @map("google_doc_id") @db.VarChar(255)
+  googleDocUrl String? @map("google_doc_url") @db.VarChar(500)
   generatedAt DateTime @default(now()) @map("generated_at")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
