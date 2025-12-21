@@ -1,10 +1,15 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Inject, forwardRef } from '@nestjs/common';
 import { PrismaService } from 'src/services/prisma.service';
 import { Task } from '@prisma/client';
+import { WorkflowService } from '../workflow/workflow.service';
 
 @Injectable()
 export class TasksService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    @Inject(forwardRef(() => WorkflowService))
+    private workflowService: WorkflowService,
+  ) {}
 
   async createTasks(tasks: any[]) {
     const emails = tasks.map((t) => t.member_mail).filter(Boolean);
@@ -43,10 +48,30 @@ export class TasksService {
   }
 
   async updateStatus(taskId: number, status: string): Promise<Task> {
-    return await this.prisma.task.update({
+    // Update task status in database
+    const updatedTask = await this.prisma.task.update({
       where: { id: taskId },
       data: { status },
+      include: {
+        project: true,
+      },
     });
+
+    // If task has Jira issue ID, sync status to Jira
+    if (updatedTask.jiraIssueId) {
+      try {
+        await this.workflowService.updateJiraIssueStatus(
+          updatedTask.jiraIssueId,
+          status,
+        );
+        console.log(`✅ Updated Jira issue ${updatedTask.jiraIssueId} status to ${status}`);
+      } catch (error: any) {
+        console.error(`❌ Failed to update Jira issue ${updatedTask.jiraIssueId}:`, error.message);
+        // Don't throw error - continue even if Jira update fails
+      }
+    }
+
+    return updatedTask;
   }
 
   async getAssignedTasks(userId: number): Promise<Task[]> {

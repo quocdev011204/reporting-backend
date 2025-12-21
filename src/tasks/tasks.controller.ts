@@ -23,6 +23,31 @@ export class TasksController {
     return this.tasksService.createTasks(tasks);
   }
 
+  @Public()
+  @Get()
+  async getAllTasks() {
+    return this.tasksService.getAllTasks();
+  }
+
+  @Public()
+  @Put(':id/status')
+  async updateStatus(
+    @Param('id') id: string,
+    @Body() body: { status: string },
+  ): Promise<Task> {
+    const status = body.status
+    if (!status) {
+      throw new Error('Status is required')
+    }
+    return this.tasksService.updateStatus(Number(id), status);
+  }
+
+  @Get('assigned-to/:userId')
+  @UseGuards(JwtAuthGuard)
+  async getAssigned(@Param('userId') userId: string): Promise<Task[]> {
+    return this.tasksService.getAssignedTasks(Number(userId));
+  }
+
   @Post()
   @UseGuards(JwtAuthGuard)
   // async create(
@@ -34,26 +59,6 @@ export class TasksController {
   //     body.estimatedTime,
   //   );
   // }
-  @Put(':id/status')
-  @UseGuards(JwtAuthGuard)
-  async updateStatus(
-    @Param('id') id: string,
-    @Body('status') status: string,
-  ): Promise<Task> {
-    return this.tasksService.updateStatus(Number(id), status);
-  }
-
-  @Public()
-  @Get()
-  async getAllTasks() {
-    return this.tasksService.getAllTasks();
-  }
-
-  @Get('assigned-to/:userId')
-  @UseGuards(JwtAuthGuard)
-  async getAssigned(@Param('userId') userId: string): Promise<Task[]> {
-    return this.tasksService.getAssignedTasks(Number(userId));
-  }
 
   @Get(':id')
   @UseGuards(JwtAuthGuard)

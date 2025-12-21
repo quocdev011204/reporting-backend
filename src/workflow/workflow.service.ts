@@ -4124,6 +4124,136 @@ Generated at: ${timestamp}
   }
 
   /**
+   * Update Jira issue status khi task status thay đổi trong DB
+   * Map status từ DB sang Jira transition
+   */
+  async updateJiraIssueStatus(issueKey: string, status: string) {
+    try {
+      // Lấy config Jira
+      const jiraUrl =
+        this.configService.get<string>('JIRA_URL') ||
+        this.configService.get<string>('JIRA_BASE_URL');
+      const jiraEmail = this.configService.get<string>('JIRA_EMAIL');
+      const jiraApiToken = this.configService.get<string>('JIRA_API_TOKEN');
+      const jiraUsername = this.configService.get<string>('JIRA_USERNAME');
+      const jiraPassword = this.configService.get<string>('JIRA_PASSWORD');
+
+      if (!jiraUrl) {
+        console.warn('⚠️ JIRA_URL không được cấu hình, bỏ qua update Jira');
+        return;
+      }
+
+      const cleanUrl = jiraUrl.endsWith('/') ? jiraUrl.slice(0, -1) : jiraUrl;
+
+      // Setup authentication
+      let authHeader = '';
+      if (jiraApiToken && jiraEmail) {
+        const token = Buffer.from(`${jiraEmail}:${jiraApiToken}`).toString('base64');
+        authHeader = `Basic ${token}`;
+      } else if (jiraUsername && jiraPassword) {
+        const token = Buffer.from(`${jiraUsername}:${jiraPassword}`).toString('base64');
+        authHeader = `Basic ${token}`;
+      } else {
+        console.warn('⚠️ JIRA authentication không được cấu hình, bỏ qua update Jira');
+        return;
+      }
+
+      // Map DB status to Jira status names
+      const statusMap: Record<string, string> = {
+        'To Do': 'To Do',
+        'In Progress': 'In Progress',
+        'Review': 'In Review',
+        'Done': 'Done',
+        'todo': 'To Do',
+        'in-progress': 'In Progress',
+        'review': 'In Review',
+        'done': 'Done',
+      };
+
+      const targetStatus = statusMap[status] || status;
+
+      // 1. Lấy available transitions cho issue này
+      const transitionsResponse = await axios.get(
+        `${cleanUrl}/rest/api/3/issue/${issueKey}/transitions`,
+        {
+          headers: {
+            Authorization: authHeader,
+            Accept: 'application/json',
+          },
+        },
+      );
+
+      const transitions = transitionsResponse.data.transitions || [];
+      
+      // 2. Tìm transition ID phù hợp với status mới
+      // Tìm transition có name hoặc to.name khớp với targetStatus
+      let transitionId: string | null = null;
+      
+      for (const transition of transitions) {
+        if (
+          transition.name?.toLowerCase() === targetStatus.toLowerCase() ||
+          transition.to?.name?.toLowerCase() === targetStatus.toLowerCase()
+        ) {
+          transitionId = transition.id;
+          break;
+        }
+      }
+
+      // Nếu không tìm thấy exact match, thử tìm theo pattern
+      if (!transitionId) {
+        const statusLower = targetStatus.toLowerCase();
+        for (const transition of transitions) {
+          const transitionName = transition.name?.toLowerCase() || '';
+          const toName = transition.to?.name?.toLowerCase() || '';
+          
+          if (
+            transitionName.includes(statusLower) ||
+            toName.includes(statusLower) ||
+            (statusLower.includes('progress') && (transitionName.includes('start') || toName.includes('progress'))) ||
+            (statusLower.includes('review') && (transitionName.includes('review') || toName.includes('review'))) ||
+            (statusLower.includes('done') && (transitionName.includes('done') || toName.includes('done') || transitionName.includes('resolve') || toName.includes('resolve')))
+          ) {
+            transitionId = transition.id;
+            break;
+          }
+        }
+      }
+
+      if (!transitionId) {
+        console.warn(`⚠️ Không tìm thấy transition phù hợp cho status "${targetStatus}" trong Jira issue ${issueKey}`);
+        console.log(`Available transitions:`, transitions.map((t: any) => ({ id: t.id, name: t.name, to: t.to?.name })));
+        return;
+      }
+
+      // 3. Thực hiện transition
+      await axios.post(
+        `${cleanUrl}/rest/api/3/issue/${issueKey}/transitions`,
+        {
+          transition: {
+            id: transitionId,
+          },
+        },
+        {
+          headers: {
+            Authorization: authHeader,
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+          },
+        },
+      );
+
+      console.log(`✅ Successfully updated Jira issue ${issueKey} to status "${targetStatus}"`);
+      return { success: true, issueKey, status: targetStatus };
+    } catch (error: any) {
+      console.error(`❌ Error updating Jira issue ${issueKey}:`, error.message);
+      if (error.response) {
+        console.error('Response:', error.response.data);
+      }
+      throw error;
+    }
+  }
+
+  /**
    * Helper: Lấy danh sách tất cả issueKeys từ Jira
    * Giúp bạn biết có những issueKeys nào trong Jira
    */
