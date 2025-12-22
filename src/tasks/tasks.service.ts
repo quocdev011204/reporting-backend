@@ -31,7 +31,7 @@ export class TasksService {
       description: task.task_description,
       estimatedTime: task.estimated_time,
       priority: task.priority,
-      status: 'To Do',
+      status: 'TO DO',
       jiraIssueId: null,
       assignedToId: userMap.get(task.member_mail) ?? null,
     }));
@@ -41,10 +41,7 @@ export class TasksService {
       taskData.map((data) => this.prisma.task.create({ data })),
     );
 
-    return {
-      count: createdTasks.length,
-      tasks: createdTasks,
-    };
+    return createdTasks;
   }
 
   async updateStatus(taskId: number, status: string): Promise<Task> {
