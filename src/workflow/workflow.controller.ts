@@ -12,8 +12,11 @@ export class WorkflowController {
    */
   @Public()
   @Get('merge-data')
-  async getMergedData() {
-    return this.workflowService.mergeDataPTM();
+  async getMergedData(@Query('projectId') projectId?: string) {
+    const id = projectId ? Number(projectId) : undefined;
+    return this.workflowService.mergeDataPTM(
+      id && !isNaN(id) ? id : undefined,
+    );
   }
 
   /**
@@ -27,13 +30,16 @@ export class WorkflowController {
     @Query('startDate') startDate?: string,
     @Query('endDate') endDate?: string,
     @Query('reportType') reportType?: 'daily' | 'weekly',
+    @Query('projectId') projectId?: string,
   ) {
     const dateRange =
       startDate && endDate ? { start: startDate, end: endDate } : undefined;
+    const id = projectId ? Number(projectId) : undefined;
     return this.workflowService.buildPrompt(
       chartUrl,
       dateRange,
       reportType || 'daily',
+      id && !isNaN(id) ? id : undefined,
     );
   }
 
@@ -48,13 +54,16 @@ export class WorkflowController {
     @Query('startDate') startDate?: string,
     @Query('endDate') endDate?: string,
     @Query('reportType') reportType?: 'daily' | 'weekly',
+    @Query('projectId') projectId?: string,
   ) {
     const dateRange =
       startDate && endDate ? { start: startDate, end: endDate } : undefined;
+    const id = projectId ? Number(projectId) : undefined;
     return this.workflowService.prepareDataForN8n(
       chartUrl,
       dateRange,
       reportType || 'daily',
+      id && !isNaN(id) ? id : undefined,
     );
   }
 
@@ -72,6 +81,7 @@ export class WorkflowController {
       startDate?: string;
       endDate?: string;
       reportType?: 'daily' | 'weekly';
+      projectId?: number;
       options?: {
         model?: string;
         temperature?: number;
@@ -89,6 +99,7 @@ export class WorkflowController {
         body.chartUrl,
         dateRange,
         body.reportType || 'daily',
+        body.projectId,
       );
       if (!promptData || !promptData.prompt) {
         throw new Error('Failed to build prompt');
@@ -147,6 +158,7 @@ export class WorkflowController {
       googleDocFolderId?: string; // Folder ID để lưu Google Docs
       reportType?: 'daily' | 'weekly'; // Loại báo cáo: daily hoặc weekly
       chartUploadResult?: any; // Kết quả từ process-chart-and-upload (có upload, share, urls)
+      projectId?: number;
     },
   ) {
     const dateRange =
@@ -160,6 +172,7 @@ export class WorkflowController {
       body.googleDocFolderId,
       body.reportType || 'daily',
       body.chartUploadResult, // Truyền chartUploadResult để chèn chart vào document
+      body.projectId,
     );
   }
 

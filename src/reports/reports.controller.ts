@@ -13,6 +13,7 @@ import {
 import { ReportsService } from './reports.service';
 import { UseGuards } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { Public } from '../auth/public.decorator';
 import { Request } from 'express';
 
 interface JwtPayload {
@@ -39,8 +40,8 @@ export class ReportsController {
     return this.reportsService.createReport(body.title, body.value, userId);
   }
 
+  @Public()
   @Get()
-  @UseGuards(JwtAuthGuard)
   async findAll(
     @Query()
     query: {
@@ -50,9 +51,15 @@ export class ReportsController {
       filter?: string;
     },
   ) {
-    return this.reportsService.getReports(query);
+    try {
+      return await this.reportsService.getReports(query);
+    } catch (error: any) {
+      console.error('Error in findAll reports:', error);
+      throw error;
+    }
   }
 
+  @Public()
   @Get(':id')
   async findOne(@Param('id', ParseIntPipe) id: number) {
     return this.reportsService.getReportById(id);
@@ -83,6 +90,7 @@ export class ReportsController {
     return this.reportsService.searchReports(query);
   }
 
+  @Public()
   @Post('ai')
   async createReportFromAI(
     @Body()
@@ -93,6 +101,11 @@ export class ReportsController {
       type?: string;
       data?: any;
       generatedAt?: string;
+      // Ưu tiên googleDocUrl, nhưng chấp nhận các alias khác từ n8n
+      googleDocUrl?: string;
+      docUrl?: string;
+      docxUrl?: string;
+      fileUrl?: string;
     },
   ) {
     return this.reportsService.createReportFromAI({
@@ -101,10 +114,20 @@ export class ReportsController {
     });
   }
 
+  @Public()
   @Put(':id/ai')
   async updateReportWithAIData(
     @Param('id', ParseIntPipe) id: number,
-    @Body() body: { title?: string; data?: any; type?: string },
+    @Body() body: { 
+      title?: string; 
+      data?: any; 
+      type?: string;
+      // Ưu tiên googleDocUrl, nhưng chấp nhận các alias khác từ n8n
+      googleDocUrl?: string;
+      docUrl?: string;
+      docxUrl?: string;
+      fileUrl?: string;
+    },
   ) {
     return this.reportsService.updateReportWithAIData(id, body);
   }

@@ -25,12 +25,17 @@ export class WorkflowService {
    * Merge data từ Projects, Tasks, và Team Members
    * Trả về dữ liệu đã được merge và format sẵn
    */
-  async mergeDataPTM() {
+  async mergeDataPTM(projectId?: number) {
+    const projectWhere = projectId ? { id: projectId } : undefined;
+    const taskWhere = projectId ? { projectId } : undefined;
+
     const [projects, tasks, users] = await Promise.all([
       this.prisma.project.findMany({
+        where: projectWhere,
         orderBy: { createdAt: 'desc' },
       }),
       this.prisma.task.findMany({
+        where: taskWhere,
         include: {
           project: {
             select: {
@@ -76,8 +81,9 @@ export class WorkflowService {
     chartUrl?: string,
     dateRange?: { start: string; end: string },
     reportType: 'daily' | 'weekly' = 'daily',
+    projectId?: number,
   ) {
-    const mergedData = await this.mergeDataPTM();
+    const mergedData = await this.mergeDataPTM(projectId);
     const kpi = await this.kpiService.calculateKPI();
 
     // Tạo items từ tasks để build CSV
@@ -345,12 +351,13 @@ ${csv}`;
     chartUrl?: string,
     dateRange?: { start: string; end: string },
     reportType: 'daily' | 'weekly' = 'daily',
+    projectId?: number,
   ) {
     const [mergedData, kpi, chartData, promptData] = await Promise.all([
-      this.mergeDataPTM(),
+      this.mergeDataPTM(projectId),
       this.kpiService.calculateKPI(),
       this.chartsService.prepareChartData(),
-      this.buildPrompt(chartUrl, dateRange, reportType),
+      this.buildPrompt(chartUrl, dateRange, reportType, projectId),
     ]);
 
     return {
@@ -534,9 +541,15 @@ ${csv}`;
     googleDocFolderId?: string,
     reportType: 'daily' | 'weekly' = 'daily',
     chartUploadResult?: any, // Kết quả từ process-chart-and-upload (có upload, share, urls)
+    projectId?: number,
   ) {
     // 1. Tự lấy data từ database và build prompt
-    const promptData = await this.buildPrompt(chartUrl, dateRange, reportType);
+    const promptData = await this.buildPrompt(
+      chartUrl,
+      dateRange,
+      reportType,
+      projectId,
+    );
 
     // 2. Xử lý AI Agent
     let aiAgentResult: any;
@@ -634,9 +647,10 @@ ${csv}`;
     }
 
     // 6. Tạo report trong database với dữ liệu từ AI
-    const reportData = {
+    // type của report sẽ theo reportType (daily/weekly/...) thay vì cố định 'ai_report'
+    const reportData: any = {
       title: reportTitle,
-      type: 'ai_report',
+      type: reportType || 'ai_report',
       data: {
         prompt: promptData.prompt,
         promptMetadata: promptData.metadata,
@@ -649,6 +663,10 @@ ${csv}`;
       },
       generatedAt: new Date(),
     };
+
+    if (projectId) {
+      reportData.projectId = projectId;
+    }
 
     // Tạo report trong database
     const report = await this.reportsService.createReportFromAI(reportData);

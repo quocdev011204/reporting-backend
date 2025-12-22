@@ -12,16 +12,57 @@ export class ReportsService {
     sort?: string;
     filter?: string;
   }) {
-    const take = query.limit ? +query.limit : 10;
-    const skip = query.page ? (+query.page - 1) * take : 0;
-    const orderBy = query.sort
-      ? { [query.sort.split(':')[0]]: query.sort.split(':')[1] }
-      : { createdAt: 'asc' as const };
-    const where = query.filter
-      ? { value: { gt: parseFloat(query.filter.split('>')[1]) } }
-      : {};
+    try {
+      const take = query.limit ? +query.limit : 10;
+      const skip = query.page ? (+query.page - 1) * take : 0;
+      
+      // Parse orderBy safely - chỉ cho phép các field hợp lệ
+      const allowedFields = ['id', 'title', 'value', 'type', 'createdAt', 'updatedAt', 'generatedAt'];
+      let orderBy: any = { createdAt: 'desc' as const };
+      if (query.sort) {
+        const [field, direction] = query.sort.split(':');
+        if (field && allowedFields.includes(field) && (direction === 'asc' || direction === 'desc')) {
+          orderBy = { [field]: direction };
+        }
+      }
+      
+      // Parse filter safely
+      const where: any = {};
+      if (query.filter) {
+        try {
+          const filterParts = query.filter.split('>');
+          if (filterParts.length === 2) {
+            const value = parseFloat(filterParts[1]);
+            if (!isNaN(value)) {
+              where.value = { gt: value };
+            }
+          }
+        } catch (e) {
+          // Ignore filter parsing errors
+        }
+      }
 
-    return this.prisma.report.findMany({ where, orderBy, skip, take });
+      const reports = await this.prisma.report.findMany({ 
+        where, 
+        orderBy, 
+        skip, 
+        take,
+        include: {
+          project: {
+            select: {
+              id: true,
+              name: true,
+            },
+          },
+        },
+      });
+      
+      return reports || [];
+    } catch (error: any) {
+      console.error('Error in getReports:', error);
+      console.error('Error details:', error.message, error.stack);
+      throw error;
+    }
   }
 
   async getReportById(id: number) {
@@ -64,7 +105,18 @@ export class ReportsService {
     type?: string;
     data?: any;
     generatedAt?: Date;
+    // chấp nhận nhiều alias cho url
+    googleDocUrl?: string;
+    docUrl?: string;
+    docxUrl?: string;
+    fileUrl?: string;
   }) {
+    const docUrl =
+      data.googleDocUrl ||
+      data.docxUrl ||
+      data.docUrl ||
+      data.fileUrl;
+
     return this.prisma.report.create({
       data: {
         projectId: data.projectId,
@@ -73,20 +125,36 @@ export class ReportsService {
         type: data.type || 'ai_report',
         data: data.data,
         generatedAt: data.generatedAt || new Date(),
+        googleDocUrl: docUrl,
       },
     });
   }
 
   async updateReportWithAIData(
     id: number,
-    data: { title?: string; data?: any; type?: string },
+    data: { 
+      title?: string; 
+      data?: any; 
+      type?: string;
+      googleDocUrl?: string;
+      docUrl?: string;
+      docxUrl?: string;
+      fileUrl?: string;
+    },
   ) {
+    const docUrl =
+      data.googleDocUrl ||
+      data.docxUrl ||
+      data.docUrl ||
+      data.fileUrl;
+
     return this.prisma.report.update({
       where: { id },
       data: {
         title: data.title,
         data: data.data,
         type: data.type,
+        googleDocUrl: docUrl,
         updatedAt: new Date(),
       },
     });
