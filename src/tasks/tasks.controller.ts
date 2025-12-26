@@ -4,6 +4,7 @@ import {
   Put,
   Patch,
   Get,
+  Delete,
   Body,
   Param,
   UseGuards,
@@ -17,7 +18,7 @@ import { Public } from '../auth/public.decorator';
 
 @Controller('tasks')
 export class TasksController {
-  constructor(private tasksService: TasksService) {}
+  constructor(private tasksService: TasksService) { }
 
   @Public()
   @Post('create')
@@ -45,79 +46,6 @@ export class TasksController {
     return this.tasksService.updateStatus(Number(id), status);
   }
 
-  @Public()
-  @Put('jira-issue-id')
-  async updateJiraIssueId(
-    @Body() body: { 
-      id?: number; 
-      task_id?: number;
-      jira_issue_id?: string;
-      jiraIssueKey?: string;
-    },
-  ): Promise<Task> {
-    // Hỗ trợ cả task_id và id trong body
-    const taskId = body.task_id || body.id
-    
-    // Hỗ trợ cả jiraIssueKey và jira_issue_id trong body
-    const jiraIssueId = body.jiraIssueKey || body.jira_issue_id
-    
-    if (!taskId) {
-      throw new Error('task_id hoặc id is required')
-    }
-    
-    if (!jiraIssueId) {
-      throw new Error('jiraIssueKey hoặc jira_issue_id is required')
-    }
-    
-    return this.tasksService.updateJiraIssueIdAndSync(Number(taskId), jiraIssueId);
-  }
-
-  @Public()
-  @Patch('jira')
-  async updateJiraIssue(
-    @Body()
-    body: {
-      task_id?: number | string;
-      jira_issue_id?: string;
-    },
-  ): Promise<Task> {
-    // Hỗ trợ cả string và number cho task_id
-    const taskId = body.task_id ? Number(body.task_id) : null;
-    const jiraIssueId = body.jira_issue_id;
-
-    if (!taskId || isNaN(taskId)) {
-      throw new HttpException(
-        'task_id is required and must be a valid number',
-        HttpStatus.BAD_REQUEST,
-      );
-    }
-
-    if (!jiraIssueId) {
-      throw new HttpException(
-        'jira_issue_id is required',
-        HttpStatus.BAD_REQUEST,
-      );
-    }
-
-    try {
-      return await this.tasksService.updateJiraIssue(taskId, jiraIssueId);
-    } catch (error: any) {
-      // Nếu task không tồn tại, Prisma sẽ throw error
-      if (error.code === 'P2025') {
-        throw new HttpException(
-          `Task with id ${taskId} not found`,
-          HttpStatus.NOT_FOUND,
-        );
-      }
-      // Log error để debug
-      console.error('Error updating Jira issue:', error);
-      throw new HttpException(
-        error.message || 'Failed to update Jira issue',
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
-    }
-  }
-
   @Get('assigned-to/:userId')
   @UseGuards(JwtAuthGuard)
   async getAssigned(@Param('userId') userId: string): Promise<Task[]> {
@@ -126,19 +54,44 @@ export class TasksController {
 
   @Post()
   @UseGuards(JwtAuthGuard)
-  // async create(
-  //   @Body() body: { title: string; description: string; estimatedTime: number },
-  // ): Promise<Task> {
-  //   return this.tasksService.createTask(
-  //     body.title,
-  //     body.description,
-  //     body.estimatedTime,
-  //   );
-  // }
+  async create(
+    @Body() body: {
+      projectId: number;
+      title: string;
+      description?: string;
+      priority?: string;
+      status?: string;
+      estimatedTime?: number;
+      assignedToId?: number;
+    },
+  ): Promise<Task> {
+    return this.tasksService.createTask(body);
+  }
 
-  // Route này phải đặt cuối cùng để tránh conflict với các route cụ thể
-  @Get(':id')
+  @Put(':id')
   @UseGuards(JwtAuthGuard)
+  async updateTask(
+    @Param('id') id: string,
+    @Body() body: {
+      title?: string;
+      description?: string;
+      priority?: string;
+      status?: string;
+      estimatedTime?: number;
+      assignedToId?: number;
+    },
+  ): Promise<Task> {
+    return this.tasksService.updateTask(Number(id), body);
+  }
+
+  @Delete(':id')
+  @UseGuards(JwtAuthGuard)
+  async deleteTask(@Param('id') id: string): Promise<Task> {
+    return this.tasksService.deleteTask(Number(id));
+  }
+
+  @Public()
+  @Get(':id')
   async getTaskById(@Param('id') id: string): Promise<Task | null> {
     return this.tasksService.getTaskById(Number(id));
   }

@@ -15,7 +15,7 @@ import { JwtAuthGuard } from './auth/jwt-auth.guard';
 import { KpiModule } from './kpi/kpi.module';
 import { ChartsModule } from './charts/charts.module';
 import { AlertsModule } from './alerts/alerts.module';
-import { WorkflowModule } from './workflow/workflow.module';
+// import { WorkflowModule } from './workflow/workflow.module'; // Removed Jira integration
 
 @Module({
   imports: [
@@ -32,7 +32,7 @@ import { WorkflowModule } from './workflow/workflow.module';
     KpiModule,
     ChartsModule,
     AlertsModule,
-    WorkflowModule,
+    // WorkflowModule, // Removed Jira integration
   ],
   controllers: [AppController],
   providers: [
@@ -44,4 +44,4 @@ import { WorkflowModule } from './workflow/workflow.module';
     },
   ],
 })
-export class AppModule {}
+export class AppModule { }

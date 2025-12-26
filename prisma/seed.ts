@@ -56,7 +56,7 @@ async function main() {
       email: 'dev2@company.com',
       password: hashedPassword,
       name: 'Le Backend',
-      role: 'DEVELOPER',
+      role: 'member',
       skills: ['NestJS', 'PostgreSQL', 'Docker'],
       jiraUserId: 'jira_dev_02',
       slackUserId: 'slack_dev_02',
@@ -73,7 +73,7 @@ async function main() {
       status: 'In Progress',
       startDate: new Date('2025-01-01'),
       endDate: new Date('2025-06-30'),
-      predictedDelay: 0,
+      predictedDelay: null,
     },
   });
 
@@ -83,7 +83,7 @@ async function main() {
       description: 'App tích điểm cho khách hàng trên iOS và Android',
       status: 'Planning',
       startDate: new Date('2025-02-15'),
-      predictedDelay: 5, // Dự đoán trễ 5 ngày
+      predictedDelay: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000), // 5 ngày sau
     },
   });
 
