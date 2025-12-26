@@ -12,6 +12,7 @@ async function bootstrap() {
       'http://localhost:3002',
       'http://192.168.100.103:3001',
       'http://192.168.100.103:3002',
+      'https://fe-reporting.vercel.app', // Vercel production
       /^http:\/\/192\.168\.\d+\.\d+:\d+$/, // Allow any local network IP
     ],
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
