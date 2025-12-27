@@ -23,7 +23,7 @@ export class TasksController {
   @Public()
   @Post('create')
   async createTasksFromN8n(@Body() body: any) {
-    const tasks = Array.isArray(body) ? body : body[0];
+    const tasks = Array.isArray(body) ? body : [body];
     return this.tasksService.createTasks(tasks);
   }
 
